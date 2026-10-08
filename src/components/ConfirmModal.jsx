@@ -1,17 +1,9 @@
 // =============================================
-// N Signage V2 — ConfirmModal Component
+// N Signage — ConfirmModal Component
 // =============================================
 import React from 'react';
+import { X, AlertTriangle, Loader2 } from 'lucide-react';
 
-/**
- * @param {boolean} isOpen
- * @param {function} onClose
- * @param {function} onConfirm
- * @param {string} title
- * @param {string|React.ReactNode} message
- * @param {string} [confirmLabel]
- * @param {boolean} [isLoading]
- */
 export default function ConfirmModal({
   isOpen,
   onClose,
@@ -24,35 +16,66 @@ export default function ConfirmModal({
 }) {
   if (!isOpen) return null;
 
-  const handleOverlayClick = (e) => {
-    if (e.target === e.currentTarget) onClose();
+  const handleOverlayClick = e => {
+    if (e.target === e.currentTarget && !isLoading) onClose();
   };
 
   return (
     <div className="modal-overlay" onClick={handleOverlayClick}>
-      <div className="modal" style={{ maxWidth: 420 }}>
+      <div className="modal" style={{ maxWidth: 440 }}>
         <div className="modal-header">
-          <h2 className="modal-title" style={{ fontSize: 'var(--text-lg)' }}>{title}</h2>
-          <button className="btn btn-ghost btn-icon" onClick={onClose} disabled={isLoading}>
-            ✕
+          <div className="modal-title">
+            <AlertTriangle
+              size={18}
+              style={{
+                color: variant === 'danger' ? 'var(--danger)' : 'var(--warning)',
+              }}
+            />
+            <span>{title}</span>
+          </div>
+          <button
+            className="btn btn-ghost btn-icon btn-sm"
+            onClick={onClose}
+            disabled={isLoading}
+            aria-label="Close dialog"
+          >
+            <X size={16} />
           </button>
         </div>
 
-        <div style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', lineHeight: 1.7 }}>
+        <div
+          style={{
+            color: 'var(--text-secondary)',
+            fontSize: 'var(--text-sm)',
+            lineHeight: 1.6,
+          }}
+        >
           {message}
         </div>
 
         <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose} disabled={isLoading}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onClose}
+            disabled={isLoading}
+          >
             Cancel
           </button>
           <button
+            type="button"
             className={`btn btn-${variant}`}
             onClick={onConfirm}
             disabled={isLoading}
           >
-            {isLoading && <span className="spinner spinner-sm" />}
-            {confirmLabel}
+            {isLoading && (
+              <Loader2
+                size={14}
+                className="spinner"
+                style={{ border: 'none', animation: 'spin 0.8s linear infinite' }}
+              />
+            )}
+            <span>{confirmLabel}</span>
           </button>
         </div>
       </div>

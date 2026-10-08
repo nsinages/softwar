@@ -1,12 +1,21 @@
 // =============================================
-// N Signage V2 — Dashboard Page
+// N Signage — Dashboard Page
 // =============================================
 import React, { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import {
+  Tv,
+  CheckCircle2,
+  AlertCircle,
+  Film,
+  Plus,
+  RotateCw,
+  Clock,
+  Loader2,
+} from 'lucide-react';
 import { usePiStatus } from '../hooks/usePiStatus';
 import { getDevices } from '../data/store';
 import DeviceCard from '../components/DeviceCard';
-import StatusBadge from '../components/StatusBadge';
 
 export default function Dashboard() {
   const devices = useMemo(() => getDevices(), []);
@@ -16,197 +25,182 @@ export default function Dashboard() {
   // Derived stats
   const onlineDevices = devices.filter(d => statusMap[d.id]?.ok === true);
   const offlineDevices = devices.filter(d => statusMap[d.id] && statusMap[d.id].ok === false);
-  const totalMedia = Object.values(statusMap).reduce(
-    (sum, s) => sum + (s?.data?.media_count ?? 0), 0
-  );
-  const currentlyPlaying = Object.values(statusMap).filter(
-    s => s?.ok && s?.data?.current_media
-  ).length;
-
-  const recentUploads = useMemo(() => {
-    const items = [];
-    devices.forEach(d => {
-      const s = statusMap[d.id];
-      if (s?.ok && s?.data?.current_media) {
-        items.push({ device: d, filename: s.data.current_media });
-      }
-    });
-    return items.slice(0, 5);
-  }, [statusMap, devices]);
+  const totalMediaFiles = useMemo(() => {
+    return Object.values(statusMap).reduce((acc, curr) => {
+      return acc + (curr?.data?.media_count || 0);
+    }, 0);
+  }, [statusMap]);
 
   return (
     <div>
-      {/* Page header */}
+      {/* Page Header */}
       <div className="page-header">
         <div className="page-header-row">
           <div>
             <h1>Dashboard</h1>
-            <p>Overview of all Raspberry Pi signage devices on the college network</p>
+            <p>Overview of all Raspberry Pi signage displays across your network</p>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+          <div className="page-header-actions">
             {lastChecked && (
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                Last checked: {lastChecked.toLocaleTimeString('en-IN')}
-              </span>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: 'var(--text-xs)',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                <Clock size={13} />
+                <span>Last checked: {lastChecked.toLocaleTimeString('en-IN')}</span>
+              </div>
             )}
             <button
               className="btn btn-secondary"
               onClick={refresh}
               disabled={isChecking}
+              title="Refresh status of all devices"
             >
-              {isChecking ? <span className="spinner spinner-sm" /> : '🔄'}
-              {isChecking ? 'Checking…' : 'Refresh Status'}
+              {isChecking ? (
+                <Loader2
+                  size={14}
+                  className="spinner"
+                  style={{ border: 'none', animation: 'spin 0.8s linear infinite' }}
+                />
+              ) : (
+                <RotateCw size={14} />
+              )}
+              <span>{isChecking ? 'Checking…' : 'Refresh Status'}</span>
             </button>
             <button
               className="btn btn-primary"
-              onClick={() => navigate('/devices')}
+              onClick={() => navigate('/devices', { state: { openAdd: true } })}
             >
-              + Add Device
+              <Plus size={15} />
+              <span>Add Device</span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* Stats */}
+      {/* Metric Summary Cards */}
       <div className="stat-grid">
-        <StatCard icon="📡" label="Total Devices" value={devices.length} variant="accent" />
-        <StatCard icon="🟢" label="Online" value={onlineDevices.length} variant="success" />
-        <StatCard icon="🔴" label="Offline" value={offlineDevices.length} variant="danger" />
-        <StatCard icon="🏫" label="Classrooms" value={devices.length} variant="accent" />
-        <StatCard icon="🎞️" label="Total Media" value={totalMedia} variant="warning" />
-        <StatCard icon="▶️" label="Playing Now" value={currentlyPlaying} variant="success" />
+        <div className="stat-card accent">
+          <div className="stat-content">
+            <span className="stat-label">Total Devices</span>
+            <div className="stat-value">{devices.length}</div>
+            <span className="stat-subtext">Configured displays</span>
+          </div>
+          <div className="stat-icon-wrapper">
+            <Tv size={22} />
+          </div>
+        </div>
+
+        <div className="stat-card success">
+          <div className="stat-content">
+            <span className="stat-label">Online</span>
+            <div className="stat-value" style={{ color: 'var(--success)' }}>
+              {onlineDevices.length}
+            </div>
+            <span className="stat-subtext">Responding on network</span>
+          </div>
+          <div className="stat-icon-wrapper">
+            <CheckCircle2 size={22} />
+          </div>
+        </div>
+
+        <div className="stat-card danger">
+          <div className="stat-content">
+            <span className="stat-label">Offline</span>
+            <div className="stat-value" style={{ color: offlineDevices.length > 0 ? 'var(--danger)' : 'var(--text-muted)' }}>
+              {offlineDevices.length}
+            </div>
+            <span className="stat-subtext">Unreachable / inactive</span>
+          </div>
+          <div className="stat-icon-wrapper">
+            <AlertCircle size={22} />
+          </div>
+        </div>
+
+        <div className="stat-card info">
+          <div className="stat-content">
+            <span className="stat-label">Media Files</span>
+            <div className="stat-value" style={{ color: 'var(--info)' }}>
+              {totalMediaFiles}
+            </div>
+            <span className="stat-subtext">Stored on active Pis</span>
+          </div>
+          <div className="stat-icon-wrapper">
+            <Film size={22} />
+          </div>
+        </div>
       </div>
 
-      {/* Two column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 'var(--space-6)', alignItems: 'start' }}>
-
-        {/* Device Grid */}
-        <div>
-          <div style={{ marginBottom: 'var(--space-4)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <h2 style={{ fontSize: 'var(--text-lg)', fontWeight: 'var(--weight-semibold)' }}>
-              Raspberry Pi Devices
+      {/* Devices Section */}
+      <div>
+        <div
+          style={{
+            marginBottom: 'var(--space-4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <div>
+            <h2 style={{ fontSize: 'var(--text-lg)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
+              Raspberry Pi Displays
             </h2>
-            {isChecking && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', color: 'var(--text-muted)', fontSize: 'var(--text-sm)' }}>
-                <span className="spinner spinner-sm" /> Checking status…
-              </div>
-            )}
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 2 }}>
+              Active signage units reporting hardware and playback status
+            </p>
           </div>
-
-          {devices.length === 0 ? (
-            <div className="empty-state card">
-              <div className="es-icon">📡</div>
-              <h3>No devices added yet</h3>
-              <p>Add your first Raspberry Pi to start managing classroom signage.</p>
-              <button className="btn btn-primary" onClick={() => navigate('/devices')}>
-                + Add Device
-              </button>
-            </div>
-          ) : (
-            <div className="device-grid">
-              {devices.map(device => (
-                <DeviceCard
-                  key={device.id}
-                  device={device}
-                  statusEntry={statusMap[device.id]}
-                  onEdit={() => navigate('/devices', { state: { editId: device.id } })}
-                  onDelete={() => navigate('/devices', { state: { deleteId: device.id } })}
-                  onTest={() => refresh()}
-                  onManageMedia={() => navigate('/media', { state: { deviceId: device.id } })}
-                />
-              ))}
+          {isChecking && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                color: 'var(--text-muted)',
+                fontSize: 'var(--text-xs)',
+              }}
+            >
+              <Loader2 size={13} className="spinner" style={{ border: 'none', animation: 'spin 0.8s linear infinite' }} />
+              <span>Polling fleet status…</span>
             </div>
           )}
         </div>
 
-        {/* Sidebar panels */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-
-          {/* Network summary */}
-          <div className="card">
-            <div className="card-header">
-              <span className="card-title" style={{ fontSize: 'var(--text-base)' }}>Network Summary</span>
+        {devices.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon">
+              <Tv size={28} />
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-              {devices.length === 0 ? (
-                <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)' }}>No devices configured</p>
-              ) : (
-                devices.slice(0, 8).map(d => {
-                  const s = statusMap[d.id];
-                  const status = !s ? 'unknown' : s.ok ? 'online' : 'offline';
-                  return (
-                    <div key={d.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 'var(--weight-medium)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
-                          {d.classroom}
-                        </div>
-                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{d.ip}</div>
-                      </div>
-                      <StatusBadge status={status} />
-                    </div>
-                  );
-                })
-              )}
-              {devices.length > 8 && (
-                <button className="btn btn-ghost btn-sm" onClick={() => navigate('/devices')} style={{ alignSelf: 'flex-start' }}>
-                  View all {devices.length} devices →
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Currently playing */}
-          <div className="card">
-            <div className="card-header">
-              <span className="card-title" style={{ fontSize: 'var(--text-base)' }}>Now Playing</span>
-            </div>
-            {recentUploads.length === 0 ? (
-              <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)' }}>No media currently displayed</p>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-                {recentUploads.map(({ device, filename }) => (
-                  <div key={device.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-                      <span className="dot dot-online" />
-                      <span style={{ fontSize: 'var(--text-sm)', fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)' }}>
-                        {device.classroom}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', paddingLeft: 'var(--space-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {filename}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Quick upload */}
-          <div className="card" style={{ background: 'var(--accent-subtle)', border: '1px solid rgba(47,129,247,0.25)' }}>
-            <div style={{ marginBottom: 'var(--space-3)' }}>
-              <div style={{ fontSize: 'var(--text-base)', fontWeight: 'var(--weight-semibold)', color: 'var(--accent)' }}>
-                ⬆️ Quick Upload
-              </div>
-              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginTop: 4 }}>
-                Upload media directly to a classroom Pi
-              </p>
-            </div>
-            <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => navigate('/upload')}>
-              Open Upload Wizard
+            <h3>No Devices Configured</h3>
+            <p>Add your first Raspberry Pi digital signage device to begin managing and broadcasting media.</p>
+            <button
+              className="btn btn-primary"
+              onClick={() => navigate('/devices', { state: { openAdd: true } })}
+              style={{ marginTop: 'var(--space-2)' }}
+            >
+              <Plus size={15} /> Add Device
             </button>
           </div>
-        </div>
+        ) : (
+          <div className="device-grid">
+            {devices.map(device => (
+              <DeviceCard
+                key={device.id}
+                device={device}
+                statusEntry={statusMap[device.id]}
+                onEdit={() => navigate('/devices', { state: { editId: device.id } })}
+                onDelete={() => navigate('/devices', { state: { deleteId: device.id } })}
+                onTest={() => refresh()}
+                onManageMedia={() => navigate('/media', { state: { deviceId: device.id } })}
+              />
+            ))}
+          </div>
+        )}
       </div>
-    </div>
-  );
-}
-
-function StatCard({ icon, label, value, variant }) {
-  return (
-    <div className={`stat-card ${variant}`}>
-      <div className="stat-icon">{icon}</div>
-      <div className="stat-value">{value}</div>
-      <div className="stat-label">{label}</div>
     </div>
   );
 }

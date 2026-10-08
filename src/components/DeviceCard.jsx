@@ -1,7 +1,18 @@
 // =============================================
-// N Signage V2 — DeviceCard Component
+// N Signage — DeviceCard Component
 // =============================================
 import React from 'react';
+import {
+  RotateCw,
+  Film,
+  Pencil,
+  Trash2,
+  Tv,
+  Clock,
+  Tag,
+  AlertCircle,
+  Play,
+} from 'lucide-react';
 import StatusBadge from './StatusBadge';
 
 function getStatus(statusEntry) {
@@ -21,7 +32,14 @@ function formatCheckedAt(date) {
   return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-export default function DeviceCard({ device, statusEntry, onEdit, onDelete, onTest, onManageMedia }) {
+export default function DeviceCard({
+  device,
+  statusEntry,
+  onEdit,
+  onDelete,
+  onTest,
+  onManageMedia,
+}) {
   const status = getStatus(statusEntry);
   const piData = statusEntry?.data;
   const latency = statusEntry?.latency;
@@ -29,102 +47,188 @@ export default function DeviceCard({ device, statusEntry, onEdit, onDelete, onTe
 
   return (
     <div
+      className="card"
       style={{
-        background: 'var(--bg-card)',
-        border: `1px solid ${status === 'online' ? 'rgba(63,185,80,0.25)' : status === 'offline' ? 'rgba(248,81,73,0.2)' : 'var(--border)'}`,
-        borderRadius: 'var(--radius-lg)',
-        padding: 'var(--space-5)',
         display: 'flex',
         flexDirection: 'column',
-        gap: 'var(--space-3)',
-        transition: 'box-shadow var(--transition-base), transform var(--transition-base)',
-        cursor: 'default',
-      }}
-      onMouseEnter={e => {
-        e.currentTarget.style.boxShadow = 'var(--shadow-md)';
-        e.currentTarget.style.transform = 'translateY(-1px)';
-      }}
-      onMouseLeave={e => {
-        e.currentTarget.style.boxShadow = 'none';
-        e.currentTarget.style.transform = 'translateY(0)';
+        gap: 'var(--space-4)',
+        borderColor:
+          status === 'online'
+            ? 'rgba(16, 185, 129, 0.3)'
+            : status === 'offline'
+            ? 'rgba(239, 68, 68, 0.25)'
+            : 'var(--border)',
       }}
     >
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 'var(--space-2)' }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-md)', color: 'var(--text-primary)', marginBottom: 2 }}>
-            {device.name}
+        <div style={{ minWidth: 0, display: 'flex', gap: 'var(--space-3)', alignItems: 'center' }}>
+          <div
+            style={{
+              width: 38,
+              height: 38,
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-elevated)',
+              color: status === 'online' ? 'var(--accent)' : 'var(--text-muted)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <Tv size={20} />
           </div>
-          <span className="ip-chip">
-            📍 {device.ip}
-          </span>
+          <div style={{ minWidth: 0 }}>
+            <div
+              style={{
+                fontWeight: 'var(--weight-semibold)',
+                fontSize: 'var(--text-md)',
+                color: 'var(--text-primary)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+              title={device.deviceId}
+            >
+              {device.deviceId}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: 2 }}>
+              <span className="ip-chip">{device.ip}</span>
+            </div>
+          </div>
         </div>
         <StatusBadge status={status} />
       </div>
 
-      {/* Location info */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-2)' }}>
-        <InfoPill icon="🎓" label="Department" value={device.department} />
-        <InfoPill icon="🏢" label="Block" value={device.block} />
-        <InfoPill icon="📶" label="Floor" value={device.floor} />
-        <InfoPill icon="🚪" label="Classroom" value={device.classroom} />
-      </div>
+      {/* Nickname pill */}
+      {device.nickName && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-secondary)',
+            background: 'var(--bg-elevated)',
+            padding: '5px 10px',
+            borderRadius: 'var(--radius-sm)',
+          }}
+        >
+          <Tag size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+          <span style={{ color: 'var(--text-muted)' }}>Nickname:</span>
+          <span style={{ fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {device.nickName}
+          </span>
+        </div>
+      )}
 
-      {/* Live Pi data */}
+      {/* Live Pi Data Banner */}
       {status === 'online' && piData && (
         <div
           style={{
             background: 'var(--success-subtle)',
-            border: '1px solid rgba(63,185,80,0.2)',
+            border: '1px solid rgba(16, 185, 129, 0.2)',
             borderRadius: 'var(--radius-md)',
-            padding: 'var(--space-3)',
+            padding: '10px 12px',
             display: 'flex',
             flexDirection: 'column',
-            gap: 'var(--space-1)',
+            gap: '4px',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--success)', fontWeight: 'var(--weight-semibold)' }}>
-              🎬 Now Playing
-            </span>
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--success)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: 'var(--text-xs)', color: 'var(--success)', fontWeight: 'var(--weight-semibold)' }}>
+              <Play size={11} fill="currentColor" />
+              <span>Now Playing</span>
+            </div>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
               {piData.media_count ?? 0} file{piData.media_count !== 1 ? 's' : ''}
             </span>
           </div>
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)', fontWeight: 'var(--weight-medium)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {piData.current_media || '— none —'}
+          <div
+            style={{
+              fontSize: 'var(--text-xs)',
+              fontFamily: 'var(--font-mono)',
+              color: 'var(--text-primary)',
+              fontWeight: 'var(--weight-medium)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={piData.current_media || 'No media active'}
+          >
+            {piData.current_media || '— Idle / No media —'}
           </div>
         </div>
       )}
 
       {status === 'offline' && (
-        <div className="alert alert-danger" style={{ fontSize: 'var(--text-xs)', padding: '6px 10px' }}>
-          ⚠️ {statusEntry?.error || 'Pi is unreachable'}
+        <div className="alert alert-danger" style={{ padding: '8px 10px', fontSize: 'var(--text-xs)' }}>
+          <AlertCircle size={14} className="alert-icon" />
+          <span>{statusEntry?.error || 'Device unreachable on LAN'}</span>
         </div>
       )}
 
-      {/* Footer */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 'auto', paddingTop: 'var(--space-2)', borderTop: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-          {checkedAt ? `⏱ ${formatCheckedAt(checkedAt)}${latency ? ` · ${formatLatency(latency)}` : ''}` : 'Not checked yet'}
-        </span>
-        <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
-          <button className="btn btn-ghost btn-sm btn-icon" title="Test connection" onClick={() => onTest(device)}>🔄</button>
-          <button className="btn btn-ghost btn-sm btn-icon" title="Manage media" onClick={() => onManageMedia(device)}>🎞️</button>
-          <button className="btn btn-ghost btn-sm btn-icon" title="Edit device" onClick={() => onEdit(device)}>✏️</button>
-          <button className="btn btn-ghost btn-sm btn-icon" title="Delete device" onClick={() => onDelete(device)} style={{ color: 'var(--danger)' }}>🗑️</button>
+      {/* Footer & Actions */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginTop: 'auto',
+          paddingTop: 'var(--space-3)',
+          borderTop: '1px solid var(--border-subtle)',
+        }}
+      >
+        <div
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-muted)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '4px',
+          }}
+        >
+          <Clock size={12} />
+          <span>
+            {checkedAt ? `${formatCheckedAt(checkedAt)}${latency ? ` (${formatLatency(latency)})` : ''}` : 'Pending test'}
+          </span>
         </div>
-      </div>
-    </div>
-  );
-}
 
-function InfoPill({ icon, label, value }) {
-  return (
-    <div style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--radius-sm)', padding: '4px 8px' }}>
-      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</div>
-      <div style={{ fontSize: 'var(--text-xs)', fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {icon} {value || '—'}
+        <div style={{ display: 'flex', gap: '4px' }}>
+          <button
+            className="btn btn-ghost btn-icon btn-sm"
+            title="Test connection"
+            aria-label="Test connection"
+            onClick={() => onTest && onTest(device)}
+          >
+            <RotateCw size={14} />
+          </button>
+          <button
+            className="btn btn-ghost btn-icon btn-sm"
+            title="Manage media"
+            aria-label="Manage media"
+            onClick={() => onManageMedia && onManageMedia(device)}
+          >
+            <Film size={14} />
+          </button>
+          <button
+            className="btn btn-ghost btn-icon btn-sm"
+            title="Edit device"
+            aria-label="Edit device"
+            onClick={() => onEdit && onEdit(device)}
+          >
+            <Pencil size={14} />
+          </button>
+          <button
+            className="btn btn-ghost btn-icon btn-sm"
+            title="Delete device"
+            aria-label="Delete device"
+            onClick={() => onDelete && onDelete(device)}
+            style={{ color: 'var(--danger)' }}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
       </div>
     </div>
   );

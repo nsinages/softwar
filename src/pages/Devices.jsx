@@ -1,55 +1,32 @@
 // =============================================
-// N Signage V2 — Devices Page
+// N Signage — Devices Page
 // =============================================
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
+import {
+  Plus,
+  Search,
+  RotateCw,
+  Pencil,
+  Trash2,
+  Tv,
+  Film,
+  Loader2,
+  X,
+  Tag,
+  Network,
+} from 'lucide-react';
 import { getDevices, saveDevice, updateDevice, deleteDevice } from '../data/store';
 import { getPiStatus } from '../api/piApi';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
+import PiDiscoveryPanel from '../components/PiDiscoveryPanel';
 
 const EMPTY_FORM = {
-  name: '', department: '', block: '', floor: '', classroom: '', ip: '',
+  deviceId: '',
+  nickName: '',
+  ip: '',
 };
-
-const DEPARTMENTS = [
-  'Artificial Intelligence and Data Science',
-  'Artificial Intelligence and Machine Learning',
-  'Biomedical Engineering',
-  'Chemical Engineering',
-  'Civil Engineering',
-  'Computer Science and Engineering',
-  'Computer Science and Business Systems',
-  'CSE (Cyber Security)',
-  'Electrical and Electronics Engineering',
-  'Electronics and Communication Engineering',
-  'Electronics Engineering (VLSI Design and Technology)',
-  'Engineering Physics',
-  'Information Technology',
-  'Mechanical Engineering',
-  'Mechatronics Engineering',
-  'Other'
-];
-
-const DEPT_SHORT = {
-  'Artificial Intelligence and Data Science': 'AI&DS',
-  'Artificial Intelligence and Machine Learning': 'AI&ML',
-  'Biomedical Engineering': 'BME',
-  'Chemical Engineering': 'CHEM',
-  'Civil Engineering': 'CIVIL',
-  'Computer Science and Engineering': 'CSE',
-  'Computer Science and Business Systems': 'CSBS',
-  'CSE (Cyber Security)': 'CSE-CS',
-  'Electrical and Electronics Engineering': 'EEE',
-  'Electronics and Communication Engineering': 'ECE',
-  'Electronics Engineering (VLSI Design and Technology)': 'VLSI',
-  'Engineering Physics': 'ENG-PHYS',
-  'Information Technology': 'IT',
-  'Mechanical Engineering': 'MECH',
-  'Mechatronics Engineering': 'MCTR'
-};
-
-const FLOORS = ['Ground Floor', '1st Floor', '2nd Floor', '3rd Floor', '4th Floor'];
 
 export default function Devices() {
   const location = useLocation();
@@ -66,8 +43,11 @@ export default function Devices() {
 
   const reload = () => setDevices(getDevices());
 
-  // Handle navigation state (e.g. from dashboard)
+  // Handle navigation state (e.g. from dashboard or direct route)
   useEffect(() => {
+    if (location.state?.openAdd) {
+      openAdd();
+    }
     if (location.state?.editId) {
       const d = devices.find(x => x.id === location.state.editId);
       if (d) openEdit(d);
@@ -76,25 +56,14 @@ export default function Devices() {
       const d = devices.find(x => x.id === location.state.deleteId);
       if (d) setDeleteTarget(d);
     }
-  }, []);
-
-  // Auto-generate name
-  useEffect(() => {
-    if (!editId && form.department && form.classroom) {
-      const dept = DEPT_SHORT[form.department] || form.department.match(/\((\w+)\)/)?.[1] || form.department.split(' ')[0];
-      setForm(f => ({ ...f, name: `N Signage - ${dept} - ${form.classroom}` }));
-    }
-  }, [form.department, form.classroom, editId]);
+  }, [location.state]);
 
   function openEdit(device) {
     setEditId(device.id);
     setForm({
-      name: device.name,
-      department: device.department,
-      block: device.block,
-      floor: device.floor,
-      classroom: device.classroom,
-      ip: device.ip,
+      deviceId: device.deviceId || '',
+      nickName: device.nickName || '',
+      ip: device.ip || '',
     });
     setErrors({});
     setShowForm(true);
@@ -116,19 +85,21 @@ export default function Devices() {
 
   function validate() {
     const e = {};
-    if (!form.name.trim()) e.name = 'Device name is required';
-    if (!form.department.trim()) e.department = 'Department is required';
-    if (!form.classroom.trim()) e.classroom = 'Classroom is required';
+    if (!form.deviceId.trim()) e.deviceId = 'Pi Username / Device Identifier is required';
+
     const ipRx = /^(\d{1,3}\.){3}\d{1,3}$/;
     if (!form.ip.trim()) e.ip = 'IP address is required';
-    else if (!ipRx.test(form.ip.trim())) e.ip = 'Enter a valid IP address (e.g. 10.10.40.94)';
+    else if (!ipRx.test(form.ip.trim())) e.ip = 'Enter a valid IPv4 address (e.g. 10.10.40.94)';
     return e;
   }
 
   function handleSubmit(e) {
     e.preventDefault();
     const errs = validate();
-    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
+      return;
+    }
     if (editId) {
       updateDevice(editId, form);
     } else {
@@ -146,7 +117,7 @@ export default function Devices() {
       reload();
       setDeleteTarget(null);
       setDeleteLoading(false);
-    }, 300);
+    }, 250);
   }
 
   async function handleTest(device) {
@@ -160,130 +131,283 @@ export default function Devices() {
   const filtered = useMemo(() => {
     if (!searchQ.trim()) return devices;
     const q = searchQ.toLowerCase();
-    return devices.filter(d =>
-      d.name?.toLowerCase().includes(q) ||
-      d.department?.toLowerCase().includes(q) ||
-      d.classroom?.toLowerCase().includes(q) ||
-      d.ip?.includes(q)
+    return devices.filter(
+      d =>
+        d.deviceId?.toLowerCase().includes(q) ||
+        d.nickName?.toLowerCase().includes(q) ||
+        d.ip?.includes(q)
     );
   }, [devices, searchQ]);
 
   return (
     <div>
-      {/* Header */}
+      {/* Page Header */}
       <div className="page-header">
         <div className="page-header-row">
           <div>
             <h1>Devices</h1>
-            <p>Manage all Raspberry Pi signage devices</p>
+            <p>Manage and monitor your Raspberry Pi signage devices</p>
           </div>
           <button className="btn btn-primary" onClick={openAdd}>
-            + Add Device
+            <Plus size={15} />
+            <span>Add Device</span>
           </button>
         </div>
       </div>
 
-      {/* Search */}
-      <div style={{ marginBottom: 'var(--space-4)', maxWidth: 340 }}>
-        <input
-          className="form-input"
-          type="text"
-          placeholder="🔍 Search by name, department, classroom, IP…"
-          value={searchQ}
-          onChange={e => setSearchQ(e.target.value)}
-        />
-      </div>
+      {/* Filter and Stats Toolbar */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 'var(--space-4)',
+          marginBottom: 'var(--space-5)',
+          flexWrap: 'wrap',
+        }}
+      >
+        <div className="search-box" style={{ width: 320, maxWidth: '100%' }}>
+          <Search size={15} className="search-icon" />
+          <input
+            className="form-input"
+            type="text"
+            placeholder="Search by ID, nickname, IP…"
+            value={searchQ}
+            onChange={e => setSearchQ(e.target.value)}
+          />
+          {searchQ && (
+            <button
+              onClick={() => setSearchQ('')}
+              className="btn btn-ghost btn-icon btn-sm"
+              style={{ position: 'absolute', right: 6 }}
+              aria-label="Clear search"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
 
-      {/* Stats row */}
-      <div style={{ display: 'flex', gap: 'var(--space-4)', marginBottom: 'var(--space-5)', flexWrap: 'wrap' }}>
-        {[
-          { label: 'Total', value: devices.length },
-          { label: 'Tested', value: Object.keys(testResults).length },
-          { label: 'Online', value: Object.values(testResults).filter(r => r?.ok).length, color: 'var(--success)' },
-          { label: 'Offline', value: Object.values(testResults).filter(r => r && !r.ok).length, color: 'var(--danger)' },
-        ].map(({ label, value, color }) => (
-          <div key={label} style={{ display: 'flex', flex: 1, minWidth: 100, flexDirection: 'column', gap: 2, padding: 'var(--space-3)', background: 'var(--bg-card)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
-            <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 'var(--weight-bold)', color: color || 'var(--text-primary)' }}>{value}</span>
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</span>
+        {/* Quick Stats Pills */}
+        <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+          <div
+            style={{
+              padding: '6px 14px',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-full)',
+              fontSize: 'var(--text-xs)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <span style={{ color: 'var(--text-muted)' }}>Total:</span>
+            <strong style={{ color: 'var(--text-primary)' }}>{devices.length}</strong>
           </div>
-        ))}
+
+          <div
+            style={{
+              padding: '6px 14px',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-full)',
+              fontSize: 'var(--text-xs)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <span style={{ color: 'var(--text-muted)' }}>Tested:</span>
+            <strong style={{ color: 'var(--text-primary)' }}>{Object.keys(testResults).length}</strong>
+          </div>
+
+          <div
+            style={{
+              padding: '6px 14px',
+              background: 'var(--bg-card)',
+              border: '1px solid rgba(16, 185, 129, 0.2)',
+              borderRadius: 'var(--radius-full)',
+              fontSize: 'var(--text-xs)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <span className="dot dot-online" style={{ width: 6, height: 6 }} />
+            <span style={{ color: 'var(--text-muted)' }}>Online:</span>
+            <strong style={{ color: 'var(--success)' }}>
+              {Object.values(testResults).filter(r => r?.ok).length}
+            </strong>
+          </div>
+
+          <div
+            style={{
+              padding: '6px 14px',
+              background: 'var(--bg-card)',
+              border: '1px solid rgba(239, 68, 68, 0.2)',
+              borderRadius: 'var(--radius-full)',
+              fontSize: 'var(--text-xs)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <span className="dot dot-offline" style={{ width: 6, height: 6 }} />
+            <span style={{ color: 'var(--text-muted)' }}>Offline:</span>
+            <strong style={{ color: 'var(--danger)' }}>
+              {Object.values(testResults).filter(r => r && !r.ok).length}
+            </strong>
+          </div>
+        </div>
       </div>
 
       {/* Device Table */}
       {filtered.length === 0 ? (
-        <div className="empty-state card">
-          <div className="es-icon">{searchQ ? '🔍' : '📡'}</div>
-          <h3>{searchQ ? 'No devices match your search' : 'No devices added yet'}</h3>
-          <p>{searchQ ? 'Try a different search term.' : 'Add your first Raspberry Pi device to get started.'}</p>
-          {!searchQ && <button className="btn btn-primary" onClick={openAdd}>+ Add Device</button>}
+        <div className="empty-state">
+          <div className="empty-state-icon">
+            <Tv size={26} />
+          </div>
+          <h3>{searchQ ? 'No Devices Found' : 'No Devices Configured'}</h3>
+          <p>
+            {searchQ
+              ? `No devices matched "${searchQ}". Try searching with a different keyword.`
+              : 'Add your first Raspberry Pi device to start controlling digital displays.'}
+          </p>
+          {!searchQ && (
+            <button className="btn btn-primary" onClick={openAdd} style={{ marginTop: 'var(--space-2)' }}>
+              <Plus size={15} /> Add Device
+            </button>
+          )}
         </div>
       ) : (
         <div className="table-container">
           <table>
             <thead>
               <tr>
-                <th>Device Name</th>
-                <th>Department</th>
-                <th>Location</th>
-                <th>IP Address</th>
-                <th>Status</th>
-                <th>Actions</th>
+                <th style={{ width: '25%' }}>Device</th>
+                <th style={{ width: '20%' }}>Nickname</th>
+                <th style={{ width: '22%' }}>IP Address</th>
+                <th style={{ width: '18%' }}>Status</th>
+                <th style={{ width: '15%', textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map(device => {
                 const testResult = testResults[device.id];
                 const isTesting = testingId === device.id;
-                const status = isTesting ? 'checking' : !testResult ? 'unknown' : testResult.ok ? 'online' : 'offline';
+                const status = isTesting
+                  ? 'checking'
+                  : !testResult
+                  ? 'unknown'
+                  : testResult.ok
+                  ? 'online'
+                  : 'offline';
+
                 return (
                   <tr key={device.id}>
                     <td>
-                      <div style={{ fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)' }}>{device.name}</div>
-                    </td>
-                    <td>
-                      <div style={{ fontSize: 'var(--text-sm)' }}>{device.department}</div>
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        <span className="badge badge-accent" style={{ alignSelf: 'flex-start' }}>{device.classroom}</span>
-                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{device.block} · {device.floor}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div
+                          style={{
+                            width: 32,
+                            height: 32,
+                            borderRadius: 'var(--radius-sm)',
+                            background: 'var(--bg-elevated)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--accent)',
+                            flexShrink: 0,
+                          }}
+                        >
+                          <Tv size={16} />
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
+                            {device.deviceId}
+                          </div>
+                        </div>
                       </div>
                     </td>
+
                     <td>
-                      <span className="ip-chip">{device.ip}</span>
-                      {testResult?.latency && (
-                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 2 }}>
-                          {testResult.latency}ms
+                      {device.nickName ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)' }}>
+                          <Tag size={12} style={{ color: 'var(--text-muted)' }} />
+                          <span>{device.nickName}</span>
                         </div>
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)' }}>—</span>
                       )}
                     </td>
+
+                    <td>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span className="ip-chip">{device.ip}</span>
+                        {testResult?.latency && (
+                          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                            {testResult.latency}ms
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
                     <td>
                       <StatusBadge status={status} />
                       {testResult?.ok && testResult.data?.current_media && (
-                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 2, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <div
+                          style={{
+                            fontSize: '11px',
+                            color: 'var(--text-muted)',
+                            marginTop: 3,
+                            maxWidth: 160,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            fontFamily: 'var(--font-mono)',
+                          }}
+                          title={testResult.data.current_media}
+                        >
                           ▶ {testResult.data.current_media}
                         </div>
                       )}
                     </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
+
+                    <td style={{ textAlign: 'right' }}>
+                      <div style={{ display: 'inline-flex', gap: '4px', alignItems: 'center' }}>
                         <button
                           className="btn btn-secondary btn-sm"
                           onClick={() => handleTest(device)}
                           disabled={isTesting}
                           title="Test connection"
                         >
-                          {isTesting ? <span className="spinner spinner-sm" /> : '🔄'}
-                          Test
+                          {isTesting ? (
+                            <Loader2
+                              size={12}
+                              className="spinner"
+                              style={{ border: 'none', animation: 'spin 0.8s linear infinite' }}
+                            />
+                          ) : (
+                            <RotateCw size={12} />
+                          )}
+                          <span>Test</span>
                         </button>
-                        <button className="btn btn-ghost btn-sm btn-icon" onClick={() => openEdit(device)} title="Edit">✏️</button>
                         <button
-                          className="btn btn-ghost btn-sm btn-icon"
+                          className="btn btn-ghost btn-icon btn-sm"
+                          onClick={() => openEdit(device)}
+                          title="Edit device"
+                          aria-label="Edit device"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-icon btn-sm"
                           onClick={() => setDeleteTarget(device)}
-                          title="Delete"
+                          title="Delete device"
+                          aria-label="Delete device"
                           style={{ color: 'var(--danger)' }}
                         >
-                          🗑️
+                          <Trash2 size={14} />
                         </button>
                       </div>
                     </td>
@@ -295,81 +419,63 @@ export default function Devices() {
         </div>
       )}
 
-      {/* Add/Edit Modal */}
+      {/* Add / Edit Device Modal */}
       {showForm && (
-        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) closeForm(); }}>
-          <div className="modal" style={{ maxWidth: 560 }}>
+        <div
+          className="modal-overlay"
+          onClick={e => {
+            if (e.target === e.currentTarget) closeForm();
+          }}
+        >
+          <div className="modal" style={{ maxWidth: 540 }}>
             <div className="modal-header">
-              <h2 className="modal-title">{editId ? '✏️ Edit Device' : '+ Add New Device'}</h2>
-              <button className="btn btn-ghost btn-icon" onClick={closeForm}>✕</button>
+              <div className="modal-title">
+                <Tv size={18} style={{ color: 'var(--accent)' }} />
+                <span>{editId ? 'Edit Device' : 'Add New Device'}</span>
+              </div>
+              <button
+                className="btn btn-ghost btn-icon btn-sm"
+                onClick={closeForm}
+                aria-label="Close form"
+              >
+                <X size={16} />
+              </button>
             </div>
+
             <form onSubmit={handleSubmit}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-
+                {/* Device Identifier */}
                 <div className="form-group">
-                  <label className="form-label">Device Name</label>
+                  <label className="form-label">Pi Username / Device Identifier</label>
                   <input
-                    className={`form-input ${errors.name ? 'border-danger' : ''}`}
-                    style={errors.name ? { borderColor: 'var(--danger)' } : {}}
-                    placeholder="e.g. N Signage - CSE - A101"
-                    value={form.name}
-                    onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                    className="form-input"
+                    placeholder="e.g. n-sinage"
+                    value={form.deviceId}
+                    onChange={e => setForm(f => ({ ...f, deviceId: e.target.value }))}
                   />
-                  {errors.name && <span className="form-error">{errors.name}</span>}
+                  {errors.deviceId && <span className="form-error">{errors.deviceId}</span>}
+                  <span className="form-hint">Host identifier configured on your Raspberry Pi</span>
                 </div>
 
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">Department</label>
-                    <select
-                      className="form-select"
-                      value={form.department}
-                      onChange={e => setForm(f => ({ ...f, department: e.target.value }))}
-                      style={errors.department ? { borderColor: 'var(--danger)' } : {}}
-                    >
-                      <option value="">Select department</option>
-                      {DEPARTMENTS.map(d => <option key={d} value={d}>{d}</option>)}
-                    </select>
-                    {errors.department && <span className="form-error">{errors.department}</span>}
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">Block (Optional)</label>
-                    <input
-                      className="form-input"
-                      placeholder="e.g. A Block"
-                      value={form.block}
-                      onChange={e => setForm(f => ({ ...f, block: e.target.value }))}
-                    />
-                  </div>
+                {/* Nickname */}
+                <div className="form-group">
+                  <label className="form-label">Nickname (Optional)</label>
+                  <input
+                    className="form-input"
+                    placeholder="e.g. Main Lobby Display, Room 101"
+                    value={form.nickName}
+                    onChange={e => setForm(f => ({ ...f, nickName: e.target.value }))}
+                  />
                 </div>
 
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">Floor (Optional)</label>
-                    <select
-                      className="form-select"
-                      value={form.floor}
-                      onChange={e => setForm(f => ({ ...f, floor: e.target.value }))}
-                    >
-                      <option value="">Select floor</option>
-                      {FLOORS.map(fl => <option key={fl} value={fl}>{fl}</option>)}
-                    </select>
-                  </div>
+                {/* V3 Discovery Panel */}
+                <PiDiscoveryPanel
+                  key={form.deviceId.trim()}
+                  identifier={form.deviceId}
+                  onUseIp={ip => setForm(f => ({ ...f, ip }))}
+                />
 
-                  <div className="form-group">
-                    <label className="form-label">Classroom</label>
-                    <input
-                      className="form-input"
-                      placeholder="e.g. A101"
-                      value={form.classroom}
-                      onChange={e => setForm(f => ({ ...f, classroom: e.target.value }))}
-                      style={errors.classroom ? { borderColor: 'var(--danger)' } : {}}
-                    />
-                    {errors.classroom && <span className="form-error">{errors.classroom}</span>}
-                  </div>
-                </div>
-
+                {/* IP Address */}
                 <div className="form-group">
                   <label className="form-label">Raspberry Pi IP Address</label>
                   <input
@@ -377,19 +483,19 @@ export default function Devices() {
                     placeholder="e.g. 10.10.40.94"
                     value={form.ip}
                     onChange={e => setForm(f => ({ ...f, ip: e.target.value }))}
-                    style={{ fontFamily: 'var(--font-mono)', ...(errors.ip ? { borderColor: 'var(--danger)' } : {}) }}
+                    style={{ fontFamily: 'var(--font-mono)' }}
                   />
                   {errors.ip && <span className="form-error">{errors.ip}</span>}
-                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                    LAN IP address of the Raspberry Pi on the college network
-                  </span>
+                  <span className="form-hint">Static or DHCP assigned local IPv4 address</span>
                 </div>
               </div>
 
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={closeForm}>Cancel</button>
+                <button type="button" className="btn btn-secondary" onClick={closeForm}>
+                  Cancel
+                </button>
                 <button type="submit" className="btn btn-primary">
-                  {editId ? '✓ Save Changes' : '+ Add Device'}
+                  {editId ? 'Save Changes' : 'Add Device'}
                 </button>
               </div>
             </form>
@@ -397,7 +503,7 @@ export default function Devices() {
         </div>
       )}
 
-      {/* Delete confirm */}
+      {/* Delete Confirmation Modal */}
       <ConfirmModal
         isOpen={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
@@ -406,9 +512,9 @@ export default function Devices() {
         title="Delete Device"
         message={
           <span>
-            Are you sure you want to remove <strong>{deleteTarget?.name}</strong>?
+            Are you sure you want to remove <strong>{deleteTarget?.deviceId}</strong>?
             <br /><br />
-            This only removes the device from this dashboard. It does <em>not</em> affect the Raspberry Pi itself.
+            This will remove the display from this management dashboard. The physical Raspberry Pi and its stored files will remain unaffected.
           </span>
         }
         confirmLabel="Delete Device"

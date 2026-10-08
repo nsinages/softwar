@@ -1,132 +1,130 @@
 // =============================================
-// N Signage V2 — Sidebar Component
+// N Signage — Sidebar Navigation Component
 // =============================================
-import React, { useState } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import React from 'react';
+import { NavLink } from 'react-router-dom';
+import {
+  LayoutDashboard,
+  Cpu,
+  Film,
+  UploadCloud,
+  Settings,
+  ChevronLeft,
+  ChevronRight,
+  Tv,
+  X,
+} from 'lucide-react';
 
-const NAV_ITEMS = [
-  { to: '/',           icon: '⊞',   label: 'Dashboard' },
-  { to: '/devices',    icon: '📡',  label: 'Devices' },
-  { to: '/classrooms', icon: '🏫',  label: 'Classrooms' },
-  { to: '/media',      icon: '🎞️', label: 'Media' },
-  { to: '/upload',     icon: '⬆️', label: 'Upload' },
-  { to: '/settings',   icon: '⚙️', label: 'Settings' },
+const MAIN_NAV = [
+  { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/devices', icon: Cpu, label: 'Devices' },
+  { to: '/media', icon: Film, label: 'Media' },
+  { to: '/upload', icon: UploadCloud, label: 'Upload' },
 ];
 
-export default function Sidebar({ collapsed, onToggle }) {
-  const location = useLocation();
+const BOTTOM_NAV = [
+  { to: '/settings', icon: Settings, label: 'Settings' },
+];
 
+export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose }) {
   return (
-    <aside
-      className="sidebar"
-      style={{
-        width: collapsed ? 'var(--sidebar-collapsed)' : 'var(--sidebar-width)',
-        transition: 'width var(--transition-slow)',
-        background: 'var(--bg-sidebar)',
-        borderRight: '1px solid var(--border)',
-        display: 'flex',
-        flexDirection: 'column',
-        position: 'sticky',
-        top: 0,
-        height: '100vh',
-        zIndex: 'var(--z-sidebar)',
-        flexShrink: 0,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Logo */}
+    <>
+      {/* Mobile backdrop */}
       <div
-        style={{
-          height: 'var(--topbar-height)',
-          display: 'flex',
-          alignItems: 'center',
-          padding: collapsed ? '0 var(--space-4)' : '0 var(--space-5)',
-          borderBottom: '1px solid var(--border)',
-          gap: 'var(--space-3)',
-          flexShrink: 0,
-        }}
+        className={`mobile-backdrop ${mobileOpen ? 'open' : ''}`}
+        onClick={onMobileClose}
+        aria-hidden="true"
+      />
+
+      <aside
+        className={`sidebar ${mobileOpen ? 'mobile-open' : ''} ${collapsed ? 'collapsed' : ''}`}
       >
-        <div
-          style={{
-            width: 32, height: 32,
-            borderRadius: 'var(--radius-md)',
-            background: 'linear-gradient(135deg, var(--accent) 0%, #60a5fa 100%)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 16, fontWeight: 700, color: '#fff',
-            flexShrink: 0,
-          }}
-        >
-          N
-        </div>
-        {!collapsed && (
-          <div style={{ overflow: 'hidden' }}>
-            <div style={{ fontWeight: 700, fontSize: 'var(--text-md)', color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>
-              N Signage
-            </div>
-            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-              V2
-            </div>
+        {/* Brand Header */}
+        <div className="sidebar-brand">
+          <div className="brand-logo-icon">
+            <Tv size={18} strokeWidth={2.2} />
           </div>
-        )}
-      </div>
 
-      {/* Nav */}
-      <nav style={{ flex: 1, padding: 'var(--space-3) var(--space-2)', overflowY: 'auto' }}>
-        <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {NAV_ITEMS.map(({ to, icon, label }) => (
-            <li key={to}>
-              <NavLink
-                to={to}
-                end={to === '/'}
-                style={({ isActive }) => ({
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 'var(--space-3)',
-                  padding: collapsed ? 'var(--space-3)' : 'var(--space-3) var(--space-3)',
-                  borderRadius: 'var(--radius-md)',
-                  color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
-                  background: isActive ? 'var(--accent-subtle)' : 'transparent',
-                  fontWeight: isActive ? 'var(--weight-semibold)' : 'var(--weight-normal)',
-                  fontSize: 'var(--text-sm)',
-                  transition: 'all var(--transition-fast)',
-                  textDecoration: 'none',
-                  justifyContent: collapsed ? 'center' : 'flex-start',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  position: 'relative',
-                })}
-              >
-                <span style={{ fontSize: 18, flexShrink: 0 }}>{icon}</span>
-                {!collapsed && <span>{label}</span>}
-              </NavLink>
-            </li>
+          <div className="brand-text">
+            <div className="brand-title">N-SIGNAGE</div>
+            <div className="brand-subtitle">Fleet Manager</div>
+          </div>
+
+          {/* Close button visible only on mobile drawer */}
+          <button
+            onClick={onMobileClose}
+            className="btn btn-ghost btn-icon btn-sm sidebar-mobile-close"
+            aria-label="Close navigation"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Main Nav Items */}
+        <nav className="sidebar-nav">
+          <div className="sidebar-section-title">Menu</div>
+
+          {MAIN_NAV.map(({ to, icon: Icon, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              onClick={onMobileClose}
+              className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+              title={label}
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon
+                    size={18}
+                    strokeWidth={isActive ? 2.2 : 1.75}
+                    className="sidebar-icon"
+                  />
+                  <span className="sidebar-label">{label}</span>
+                </>
+              )}
+            </NavLink>
           ))}
-        </ul>
-      </nav>
 
-      {/* Collapse toggle */}
-      <div
-        style={{
-          padding: 'var(--space-3)',
-          borderTop: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        <button
-          onClick={onToggle}
-          className="btn btn-ghost"
-          style={{
-            width: '100%',
-            justifyContent: collapsed ? 'center' : 'flex-start',
-            fontSize: 'var(--text-sm)',
-            gap: 'var(--space-2)',
-          }}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          <span style={{ fontSize: 16 }}>{collapsed ? '→' : '←'}</span>
-          {!collapsed && <span>Collapse</span>}
-        </button>
-      </div>
-    </aside>
+          <div className="sidebar-divider" />
+
+          <div className="sidebar-section-title">System</div>
+
+          {BOTTOM_NAV.map(({ to, icon: Icon, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              onClick={onMobileClose}
+              className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+              title={label}
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon
+                    size={18}
+                    strokeWidth={isActive ? 2.2 : 1.75}
+                    className="sidebar-icon"
+                  />
+                  <span className="sidebar-label">{label}</span>
+                </>
+              )}
+            </NavLink>
+          ))}
+        </nav>
+
+        {/* Sidebar Footer / Collapse toggle (desktop only) */}
+        <div className="sidebar-footer">
+          <button
+            onClick={onToggle}
+            className="btn btn-ghost sidebar-collapse-btn"
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+            <span className="sidebar-collapse-label">Collapse</span>
+          </button>
+        </div>
+      </aside>
+    </>
   );
 }

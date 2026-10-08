@@ -6,15 +6,11 @@
 export {
   getDevices,
   getDeviceById,
-  getDeviceByClassroom,
+  getDeviceByDeviceId,
   saveDevice,
   updateDevice,
   deleteDevice,
   resetDevicesToDefault,
-  getClassrooms,
-  getUniqueDepartments,
-  getBlocksByDepartment,
-  getClassroomsByDeptAndBlock,
   getSettings,
   saveSettings,
 } from '../data/store';

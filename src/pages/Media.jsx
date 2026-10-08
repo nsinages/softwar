@@ -1,6 +1,20 @@
+// =============================================
+// N Signage — Media Library Page
+// =============================================
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { getDevices, getUniqueDepartments } from '../data/store';
+import {
+  Film,
+  Image as ImageIcon,
+  UploadCloud,
+  RotateCw,
+  Search,
+  X,
+  AlertTriangle,
+  Loader2,
+  Tv,
+} from 'lucide-react';
+import { getDevices } from '../data/store';
 import { getPiMedia, getPiStatus, deleteMedia } from '../api/piApi';
 import MediaCard from '../components/MediaCard';
 import ConfirmModal from '../components/ConfirmModal';
@@ -14,56 +28,6 @@ export default function Media() {
   // Preselect device from navigation state
   const initialDeviceId = location.state?.deviceId || '';
   const [selectedDeviceId, setSelectedDeviceId] = useState(initialDeviceId);
-  
-  const [deptFilter, setDeptFilter] = useState('');
-  const [blockFilter, setBlockFilter] = useState('');
-
-  const departments = useMemo(() => getUniqueDepartments(), []);
-  const blocks = useMemo(() => {
-    return [...new Set(devices.map(d => d.block).filter(Boolean))].sort();
-  }, [devices]);
-
-  // Synchronize filters when selectedDeviceId changes (e.g. from nav link)
-  useEffect(() => {
-    if (selectedDeviceId) {
-      const dev = devices.find(d => d.id === selectedDeviceId);
-      if (dev) {
-        setDeptFilter(dev.department);
-        setBlockFilter(dev.block);
-      }
-    }
-  }, [selectedDeviceId, devices]);
-
-  const filteredClassrooms = useMemo(() => {
-    let list = devices;
-    if (deptFilter) list = list.filter(d => d.department === deptFilter);
-    if (blockFilter) list = list.filter(d => d.block === blockFilter);
-    return list;
-  }, [devices, deptFilter, blockFilter]);
-
-  const handleDeptFilterChange = (val) => {
-    setDeptFilter(val);
-    const list = devices.filter(d => {
-      const matchDept = !val || d.department === val;
-      const matchBlock = !blockFilter || d.block === blockFilter;
-      return matchDept && matchBlock;
-    });
-    if (!list.some(d => d.id === selectedDeviceId)) {
-      setSelectedDeviceId('');
-    }
-  };
-
-  const handleBlockFilterChange = (val) => {
-    setBlockFilter(val);
-    const list = devices.filter(d => {
-      const matchDept = !deptFilter || d.department === deptFilter;
-      const matchBlock = !val || d.block === val;
-      return matchDept && matchBlock;
-    });
-    if (!list.some(d => d.id === selectedDeviceId)) {
-      setSelectedDeviceId('');
-    }
-  };
 
   const selectedDevice = devices.find(d => d.id === selectedDeviceId) || null;
 
@@ -98,8 +62,12 @@ export default function Media() {
 
   useEffect(() => {
     if (selectedDevice) fetchAll();
-    else { setMediaList([]); setPiStatus(null); setError(''); }
-  }, [fetchAll]);
+    else {
+      setMediaList([]);
+      setPiStatus(null);
+      setError('');
+    }
+  }, [fetchAll, selectedDevice]);
 
   async function handleDelete() {
     if (!deleteTarget || !selectedDevice) return;
@@ -141,143 +109,203 @@ export default function Media() {
 
   return (
     <div>
+      {/* Page Header */}
       <div className="page-header">
         <div className="page-header-row">
           <div>
             <h1>Media Library</h1>
-            <p>Browse and manage media files on Raspberry Pi devices</p>
+            <p>Browse and manage images and video files stored on Raspberry Pi devices</p>
           </div>
-          <button className="btn btn-primary" onClick={() => navigate('/upload')}>
-            ⬆️ Upload Media
+          <button
+            className="btn btn-primary"
+            onClick={() =>
+              navigate('/upload', {
+                state: { preselectDeviceId: selectedDevice?.id },
+              })
+            }
+          >
+            <UploadCloud size={15} />
+            <span>Upload Media</span>
           </button>
         </div>
       </div>
 
-      {/* Device selector */}
+      {/* Target Device Selector Card */}
       <div
         className="card"
-        style={{ marginBottom: 'var(--space-5)', display: 'flex', alignItems: 'center', gap: 'var(--space-4)', flexWrap: 'wrap' }}
+        style={{
+          marginBottom: 'var(--space-5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 'var(--space-4)',
+          flexWrap: 'wrap',
+        }}
       >
-         {/* Concurrent Filters & Classroom Selector */}
-        <div style={{ display: 'flex', gap: 'var(--space-3)', flex: 2, flexWrap: 'wrap', width: '100%' }}>
-          <div className="form-group" style={{ flex: 1, minWidth: 180, margin: 0 }}>
-            <label className="form-label">Filter Department</label>
-            <select className="form-select" value={deptFilter} onChange={e => handleDeptFilterChange(e.target.value)}>
-              <option value="">— All Departments —</option>
-              {departments.map(d => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </div>
-
-          <div className="form-group" style={{ flex: 1, minWidth: 140, margin: 0 }}>
-            <label className="form-label">Filter Block</label>
-            <select className="form-select" value={blockFilter} onChange={e => handleBlockFilterChange(e.target.value)}>
-              <option value="">— All Blocks —</option>
-              {blocks.map(b => <option key={b} value={b}>{b}</option>)}
-            </select>
-          </div>
-
-          <div className="form-group" style={{ flex: 1.5, minWidth: 180, margin: 0 }}>
-            <label className="form-label">Select Classroom / Device</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', flex: 1, minWidth: 260, flexWrap: 'wrap' }}>
+          <div className="form-group" style={{ flex: 1, minWidth: 240, margin: 0 }}>
+            <label className="form-label" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              Target Signage Display
+            </label>
             <select
               className="form-select"
               value={selectedDeviceId}
               onChange={e => setSelectedDeviceId(e.target.value)}
             >
-              <option value="">— Choose a classroom ({filteredClassrooms.length}) —</option>
-              {filteredClassrooms.map(d => (
+              <option value="">— Select a Raspberry Pi ({devices.length} available) —</option>
+              {devices.map(d => (
                 <option key={d.id} value={d.id}>
-                  {d.classroom} — {d.department.split(' ')[0]} ({d.ip})
+                  {d.deviceId} {d.nickName ? `(${d.nickName})` : ''} · {d.ip}
                 </option>
               ))}
             </select>
           </div>
+
+          {selectedDevice && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>IP Address</span>
+                <span className="ip-chip">{selectedDevice.ip}</span>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Status</span>
+                <StatusBadge status={piStatusStr} />
+              </div>
+
+              {piStatus?.ok && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Files on Pi</span>
+                  <strong style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+                    {piStatus.data?.media_count ?? mediaList.length}
+                  </strong>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {selectedDevice && (
-          <>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>Raspberry Pi</span>
-              <span className="ip-chip" style={{ fontSize: 'var(--text-sm)' }}>{selectedDevice.ip}</span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>Status</span>
-              <StatusBadge status={piStatusStr} />
-            </div>
-            {piStatus?.ok && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>Files</span>
-                <span style={{ fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>
-                  {piStatus.data?.media_count ?? mediaList.length}
-                </span>
-              </div>
+          <button
+            className="btn btn-secondary"
+            onClick={fetchAll}
+            disabled={loading}
+            title="Refresh media files from this Pi"
+          >
+            {loading ? (
+              <Loader2 size={14} className="spinner" style={{ border: 'none', animation: 'spin 0.8s linear infinite' }} />
+            ) : (
+              <RotateCw size={14} />
             )}
-            <button
-              className="btn btn-secondary"
-              onClick={fetchAll}
-              disabled={loading}
-            >
-              {loading ? <span className="spinner spinner-sm" /> : '🔄'}
-              Refresh
-            </button>
-          </>
+            <span>Refresh</span>
+          </button>
         )}
       </div>
 
+      {/* Main Content Area */}
       {!selectedDevice ? (
-        <div className="empty-state card">
-          <div className="es-icon">🎞️</div>
-          <h3>Select a classroom to view media</h3>
-          <p>Choose a classroom from the dropdown above to browse its Raspberry Pi media library.</p>
+        <div className="empty-state">
+          <div className="empty-state-icon">
+            <Film size={26} />
+          </div>
+          <h3>Select a Device</h3>
+          <p>Choose a Raspberry Pi display from the dropdown menu above to inspect and manage its stored media files.</p>
         </div>
       ) : loading ? (
-        <div className="empty-state" style={{ padding: 'var(--space-10)' }}>
-          <span className="spinner spinner-lg" />
-          <p style={{ color: 'var(--text-muted)' }}>Fetching media from {selectedDevice.ip}…</p>
+        <div className="empty-state">
+          <Loader2 size={32} className="spinner" style={{ border: 'none', animation: 'spin 0.8s linear infinite', color: 'var(--accent)' }} />
+          <p style={{ color: 'var(--text-muted)' }}>Fetching media library from {selectedDevice.ip}…</p>
         </div>
       ) : error ? (
         <div className="alert alert-danger" style={{ marginBottom: 'var(--space-4)' }}>
-          ⚠️ {error}
-          <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'var(--space-3)' }} onClick={fetchAll}>Retry</button>
+          <AlertTriangle size={16} className="alert-icon" />
+          <div style={{ flex: 1 }}>
+            <strong>Connection Error:</strong> {error}
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={fetchAll}>
+            Retry
+          </button>
         </div>
       ) : (
         <>
-          {/* Toolbar */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap' }}>
-            <input
-              className="form-input"
-              style={{ maxWidth: 240 }}
-              placeholder="🔍 Search files…"
-              value={searchQ}
-              onChange={e => setSearchQ(e.target.value)}
-            />
-            <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
-              {['all', 'image', 'video'].map(t => (
+          {/* Filter Toolbar */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 'var(--space-3)',
+              marginBottom: 'var(--space-4)',
+              flexWrap: 'wrap',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+              <div className="search-box" style={{ width: 240 }}>
+                <Search size={14} className="search-icon" />
+                <input
+                  className="form-input"
+                  placeholder="Search filenames…"
+                  value={searchQ}
+                  onChange={e => setSearchQ(e.target.value)}
+                />
+                {searchQ && (
+                  <button
+                    onClick={() => setSearchQ('')}
+                    className="btn btn-ghost btn-icon btn-sm"
+                    style={{ position: 'absolute', right: 4 }}
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+
+              {/* Filter Tabs */}
+              <div style={{ display: 'flex', gap: '4px', background: 'var(--bg-card)', padding: '3px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
                 <button
-                  key={t}
-                  className={`btn btn-sm ${filterType === t ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => setFilterType(t)}
+                  className={`btn btn-sm ${filterType === 'all' ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setFilterType('all')}
                 >
-                  {t === 'all' ? 'All' : t === 'image' ? '🖼️ Images' : '🎬 Videos'}
+                  All
                 </button>
-              ))}
+                <button
+                  className={`btn btn-sm ${filterType === 'image' ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setFilterType('image')}
+                >
+                  <ImageIcon size={12} /> Images
+                </button>
+                <button
+                  className={`btn btn-sm ${filterType === 'video' ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setFilterType('video')}
+                >
+                  <Film size={12} /> Videos
+                </button>
+              </div>
             </div>
-            <span style={{ marginLeft: 'auto', fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>
-              {filteredMedia.length} file{filteredMedia.length !== 1 ? 's' : ''}
+
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              Showing {filteredMedia.length} of {mediaList.length} file{mediaList.length !== 1 ? 's' : ''}
             </span>
           </div>
 
+          {/* Media Grid */}
           {filteredMedia.length === 0 ? (
-            <div className="empty-state card">
-              <div className="es-icon">📂</div>
-              <h3>{searchQ || filterType !== 'all' ? 'No files match your filter' : 'No media on this Pi'}</h3>
+            <div className="empty-state">
+              <div className="empty-state-icon">
+                <Film size={26} />
+              </div>
+              <h3>{searchQ || filterType !== 'all' ? 'No Matching Media Files' : 'No Media Files on Pi'}</h3>
               <p>
                 {searchQ || filterType !== 'all'
-                  ? 'Try clearing your search or filter.'
-                  : 'Upload media to this classroom Pi using the Upload page.'}
+                  ? 'Try clearing the search query or changing the filter type.'
+                  : `There are currently no media files stored on ${selectedDevice.deviceId}.`}
               </p>
               {!searchQ && filterType === 'all' && (
-                <button className="btn btn-primary" onClick={() => navigate('/upload', { state: { deviceId: selectedDevice.id } })}>
-                  ⬆️ Upload Media
+                <button
+                  className="btn btn-primary"
+                  onClick={() => navigate('/upload', { state: { preselectDeviceId: selectedDevice.id } })}
+                  style={{ marginTop: 'var(--space-2)' }}
+                >
+                  <UploadCloud size={15} /> Upload Media
                 </button>
               )}
             </div>
@@ -292,7 +320,10 @@ export default function Media() {
                     piIp={selectedDevice.ip}
                     isCurrent={currentMedia === filename}
                     onDelete={m => setDeleteTarget(m)}
-                    onPreview={(m, url) => { setPreviewMedia(m); setPreviewUrl(url); }}
+                    onPreview={(m, url) => {
+                      setPreviewMedia(m);
+                      setPreviewUrl(url);
+                    }}
                   />
                 );
               })}
@@ -301,25 +332,27 @@ export default function Media() {
         </>
       )}
 
-      {/* Delete confirm */}
+      {/* Delete Confirmation Modal */}
       <ConfirmModal
         isOpen={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleDelete}
         isLoading={deleteLoading}
-        title="Delete Media"
+        title="Delete Media File"
         message={
           <span>
-            Are you sure you want to delete <strong>{deleteTarget?.filename || deleteTarget?.name}</strong> from the Raspberry Pi?
+            Are you sure you want to delete{' '}
+            <strong>{deleteTarget?.filename || deleteTarget?.name}</strong> from{' '}
+            <strong>{selectedDevice?.deviceId}</strong>?
             <br /><br />
-            This will remove the file from the Pi's storage and stop it from being displayed.
+            This will permanently remove the file from the Raspberry Pi storage.
           </span>
         }
         confirmLabel="Delete File"
         variant="danger"
       />
 
-      {/* Preview modal */}
+      {/* High-Resolution Preview Modal */}
       {previewMedia && (
         <div
           className="modal-overlay"
@@ -327,29 +360,73 @@ export default function Media() {
           style={{ alignItems: 'center', justifyContent: 'center' }}
         >
           <div
+            className="modal"
             style={{
-              background: 'var(--bg-elevated)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-xl)',
-              padding: 'var(--space-4)',
               maxWidth: '90vw',
+              width: 'auto',
               maxHeight: '90vh',
               display: 'flex',
               flexDirection: 'column',
               gap: 'var(--space-3)',
+              padding: 'var(--space-4)',
             }}
             onClick={e => e.stopPropagation()}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-4)' }}>
-              <span style={{ fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-base)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 'var(--space-4)',
+                borderBottom: '1px solid var(--border-subtle)',
+                paddingBottom: 'var(--space-2)',
+              }}
+            >
+              <span
+                style={{
+                  fontWeight: 'var(--weight-semibold)',
+                  fontSize: 'var(--text-sm)',
+                  color: 'var(--text-primary)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
                 {previewMedia.filename || previewMedia.name}
               </span>
-              <button className="btn btn-ghost btn-icon" onClick={() => setPreviewMedia(null)}>✕</button>
+              <button
+                className="btn btn-ghost btn-icon btn-sm"
+                onClick={() => setPreviewMedia(null)}
+                aria-label="Close preview"
+              >
+                <X size={16} />
+              </button>
             </div>
+
             {/\.(jpg|jpeg|png|gif|webp)$/i.test(previewMedia.filename || previewMedia.name) ? (
-              <img src={previewUrl} alt="preview" style={{ maxWidth: '80vw', maxHeight: '75vh', objectFit: 'contain', borderRadius: 'var(--radius-md)' }} />
+              <img
+                src={previewUrl}
+                alt="Full Preview"
+                style={{
+                  maxWidth: '82vw',
+                  maxHeight: '74vh',
+                  objectFit: 'contain',
+                  borderRadius: 'var(--radius-md)',
+                  background: '#090d16',
+                }}
+              />
             ) : (
-              <video src={previewUrl} controls style={{ maxWidth: '80vw', maxHeight: '75vh', borderRadius: 'var(--radius-md)' }} />
+              <video
+                src={previewUrl}
+                controls
+                autoPlay
+                style={{
+                  maxWidth: '82vw',
+                  maxHeight: '74vh',
+                  borderRadius: 'var(--radius-md)',
+                  background: '#090d16',
+                }}
+              />
             )}
           </div>
         </div>

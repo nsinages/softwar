@@ -1,19 +1,30 @@
 // =============================================
-// N Signage V2 — UploadPanel Component
+// N Signage — UploadPanel Component
 // =============================================
 import React, { useRef, useState } from 'react';
+import {
+  UploadCloud,
+  File,
+  X,
+  AlertTriangle,
+  FileText,
+  Film,
+  Image as ImageIcon,
+} from 'lucide-react';
 
 const ALLOWED_EXTS = /\.(jpg|jpeg|png|gif|webp|mp4|m4v|webm|mov)$/i;
 const ALLOWED_TYPES = [
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-  'video/mp4', 'video/x-m4v', 'video/webm', 'video/quicktime',
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'video/mp4',
+  'video/x-m4v',
+  'video/webm',
+  'video/quicktime',
 ];
 const WARN_SIZE_MB = 500;
 
-/**
- * @param {function} onFileSelect - called with the File object
- * @param {File|null} selectedFile
- */
 export default function UploadPanel({ onFileSelect, selectedFile }) {
   const inputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
@@ -23,13 +34,12 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
     if (!file) return;
     setError('');
     if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXTS.test(file.name)) {
-      setError(`Unsupported file: "${file.name}". Allowed: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV`);
+      setError(`Unsupported format: "${file.name}". Allowed: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV`);
       return;
     }
     const sizeMB = file.size / (1024 * 1024);
     if (sizeMB > WARN_SIZE_MB) {
-      setError(`⚠️ Large file (${sizeMB.toFixed(0)} MB). Upload may take a while.`);
-      // still allow — just warn
+      setError(`Large file warning (${sizeMB.toFixed(0)} MB). Upload to local Pi might take longer.`);
     }
     onFileSelect(file);
   }
@@ -52,64 +62,106 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
     const sizeMB = (selectedFile.size / (1024 * 1024)).toFixed(2);
 
     return (
-      <div>
-        {/* Preview */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+        {/* Preview Frame */}
         <div
           style={{
             background: 'var(--bg-elevated)',
             border: '1px solid var(--border)',
             borderRadius: 'var(--radius-lg)',
             overflow: 'hidden',
-            marginBottom: 'var(--space-3)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            maxHeight: 280,
           }}
         >
           {isImage && (
             <img
               src={previewUrl}
-              alt="Preview"
-              style={{ width: '100%', maxHeight: 260, objectFit: 'contain', display: 'block', background: '#000' }}
+              alt="Selected Preview"
+              style={{
+                width: '100%',
+                maxHeight: 280,
+                objectFit: 'contain',
+                display: 'block',
+                background: '#090d16',
+              }}
             />
           )}
           {isVideo && (
             <video
               src={previewUrl}
               controls
-              style={{ width: '100%', maxHeight: 260, background: '#000', display: 'block' }}
+              style={{
+                width: '100%',
+                maxHeight: 280,
+                background: '#090d16',
+                display: 'block',
+              }}
             />
           )}
           {!isImage && !isVideo && (
-            <div style={{ height: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 40 }}>
-              📄
+            <div style={{ padding: 'var(--space-8)', color: 'var(--text-muted)' }}>
+              <FileText size={48} />
             </div>
           )}
         </div>
 
-        {/* File info */}
+        {/* Selected File Details Strip */}
         <div
           style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            background: 'var(--bg-elevated)', borderRadius: 'var(--radius-md)',
-            padding: 'var(--space-3)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'var(--bg-elevated)',
+            borderRadius: 'var(--radius-md)',
+            padding: '10px 14px',
+            border: '1px solid var(--border)',
           }}
         >
-          <div>
-            <div style={{ fontWeight: 'var(--weight-medium)', fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
-              {selectedFile.name}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+            <div style={{ color: 'var(--accent)', flexShrink: 0 }}>
+              {isImage ? <ImageIcon size={18} /> : isVideo ? <Film size={18} /> : <File size={18} />}
             </div>
-            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              {sizeMB} MB · {selectedFile.type || 'Unknown type'}
+            <div style={{ minWidth: 0 }}>
+              <div
+                style={{
+                  fontWeight: 'var(--weight-semibold)',
+                  fontSize: 'var(--text-sm)',
+                  color: 'var(--text-primary)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {selectedFile.name}
+              </div>
+              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                {sizeMB} MB · {selectedFile.type || 'File'}
+              </div>
             </div>
           </div>
+
           <button
+            type="button"
             className="btn btn-ghost btn-sm"
-            onClick={() => { onFileSelect(null); inputRef.current.value = ''; }}
-            style={{ color: 'var(--danger)' }}
+            onClick={() => {
+              onFileSelect(null);
+              if (inputRef.current) inputRef.current.value = '';
+            }}
+            style={{ color: 'var(--danger)', flexShrink: 0 }}
           >
-            ✕ Remove
+            <X size={14} /> Remove
           </button>
         </div>
 
-        {error && <div className="alert alert-warning" style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-xs)' }}>{error}</div>}
+        {error && (
+          <div className="alert alert-warning" style={{ fontSize: 'var(--text-xs)' }}>
+            <AlertTriangle size={14} className="alert-icon" />
+            <span>{error}</span>
+          </div>
+        )}
       </div>
     );
   }
@@ -118,17 +170,25 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
     <div>
       <div
         className={`dropzone ${dragOver ? 'drag-over' : ''}`}
-        onClick={() => inputRef.current.click()}
-        onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+        onClick={() => inputRef.current?.click()}
+        onDragOver={e => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
       >
-        <div className="dz-icon">📁</div>
-        <p><strong>Click to select</strong> or drag &amp; drop media here</p>
-        <p style={{ marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-          JPG · PNG · GIF · WEBP · MP4 · M4V · WEBM · MOV
+        <div className="dropzone-icon">
+          <UploadCloud size={24} />
+        </div>
+        <p style={{ fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>
+          Click to browse or drag &amp; drop media here
+        </p>
+        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          Supported: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV (Up to 500 MB)
         </p>
       </div>
+
       <input
         ref={inputRef}
         type="file"
@@ -136,7 +196,13 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
         style={{ display: 'none' }}
         onChange={handleChange}
       />
-      {error && <div className="alert alert-danger" style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-xs)' }}>{error}</div>}
+
+      {error && (
+        <div className="alert alert-danger" style={{ marginTop: 'var(--space-3)', fontSize: 'var(--text-xs)' }}>
+          <AlertTriangle size={14} className="alert-icon" />
+          <span>{error}</span>
+        </div>
+      )}
     </div>
   );
 }

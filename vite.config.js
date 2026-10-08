@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import http from 'http'
+import { discoveryRequestHandler } from './discovery/piDiscovery.js'
 
 function piProxyPlugin() {
   return {
@@ -21,7 +22,7 @@ function piProxyPlugin() {
           return
         }
 
-        const [ip, port, path] = match
+        const [, ip, port, path] = match
 
         console.log(
           `[PI PROXY] ${req.method || 'GET'} http://${ip}:${port}/${path}`
@@ -93,10 +94,25 @@ function piProxyPlugin() {
   }
 }
 
+// V3: LAN Pi discovery helper (mDNS / DNS-SD). Browsers cannot do this
+// themselves, so the server that hosts the site answers /discovery-api/*.
+function piDiscoveryPlugin() {
+  return {
+    name: 'pi-discovery',
+    configureServer(server) {
+      server.middlewares.use('/discovery-api', discoveryRequestHandler)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use('/discovery-api', discoveryRequestHandler)
+    }
+  }
+}
+
 export default defineConfig({
   plugins: [
     react(),
-    piProxyPlugin()
+    piProxyPlugin(),
+    piDiscoveryPlugin()
   ],
 
   server: {
