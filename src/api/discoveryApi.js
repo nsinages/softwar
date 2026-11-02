@@ -28,12 +28,15 @@ export function isDiscoveryDebug() {
 }
 
 /**
- * Ask the LAN discovery helper to find a Raspberry Pi by its username/hostname.
- * @param {string} identifier - Pi username / device identifier, e.g. "n-sinage"
+ * Ask the LAN discovery helper to find a Raspberry Pi by its Linux username.
+ * The helper only returns Pis whose OWN reported username matches.
+ * @param {string} identifier - Pi Linux username, e.g. "ns"
  * @returns {Promise<{
- *   found: boolean, identifier: string, ip?: string, port?: number,
- *   online?: boolean, method?: string, identityVerified?: boolean,
- *   reason?: string, log: string[]
+ *   found: boolean, identifier: string, multiple?: boolean,
+ *   devices: Array<{ip, port, username, hostname, deviceId, online, method}>,
+ *   ip?: string, port?: number, username?: string, hostname?: string,
+ *   deviceId?: string, online?: boolean, method?: string,
+ *   otherCount?: number, reason?: string, log: string[]
  * }>}
  */
 export async function findPi(identifier) {
@@ -41,7 +44,7 @@ export async function findPi(identifier) {
   let result;
   try {
     const res = await axios.get(url, { timeout: DISCOVERY_TIMEOUT });
-    result = { log: [], ...res.data };
+    result = { log: [], devices: [], ...res.data };
   } catch (error) {
     const data = error.response?.data;
     result = {
@@ -49,6 +52,7 @@ export async function findPi(identifier) {
       identifier,
       reason: data?.reason || 'helper-unavailable',
       error: data?.error,
+      devices: [],
       log: [...(data?.log || []), `Discovery helper request failed: ${error.message} (${url})`],
     };
   }

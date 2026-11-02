@@ -8,22 +8,26 @@
 //   GET /discovery-api/find?identifier=<pi-username>
 //
 // Discovery order (local network only, no IP scanning):
-//   1. DNS-SD  — `_nsignage._tcp.local` service whose TXT `id=` (or instance
-//                name) matches the identifier.          [Pi V3 Phase 2]
-//   2. mDNS    — `<identifier>.local` A record. Raspberry Pi OS already
-//                announces its hostname via Avahi.         [works today]
-//   3. OS resolver fallback for `<identifier>.local` (Bonjour/systemd-resolved)
-//      in case the multicast socket is blocked by a firewall.
-// Every candidate is then verified against the Pi Flask API `/api/status`.
+//   1. UDP broadcast — `nsignage-discover` sent to the broadcast address of
+//      each of this machine's own LAN interfaces (UDP 50500). Every N-Signage
+//      Pi running n-signage-discovery.service answers with its own Linux
+//      username, hostname, device id and current IPv4.      [primary]
+//   2. mDNS fallback (only if no Pi answered the broadcast):
+//      DNS-SD `_nsignage._tcp.local` / `<identifier>.local` A record, then the
+//      OS `.local` resolver in case the multicast socket is blocked.
+// A Pi is only accepted when the Linux username IT reports (broadcast reply or
+// `/api/status.pi_username`) matches the identifier. Every match is then
+// checked against the Pi Flask API `/api/status` for online status.
 //
-// TEMPORARY V3 TEST MODE: results are returned to the caller only.
-// Nothing is written to the device store / database.
+// Results are returned to the caller only. Nothing is written to the device
+// store here; registration happens in the website's Add Device form.
 // =============================================
 
 import dgram from 'node:dgram';
 import os from 'node:os';
 import dns from 'node:dns/promises';
 import http from 'node:http';
+import crypto from 'node:crypto';
 
 const MDNS_ADDR = '224.0.0.251';
 const MDNS_PORT = 5353;
@@ -33,15 +37,31 @@ const RESOLVER_TIMEOUT = 3000;
 const VERIFY_TIMEOUT = 3000;
 const DEFAULT_PI_PORT = 5000;
 
+export const UDP_DISCOVERY_PORT = Number(process.env.NSIGNAGE_DISCOVERY_PORT) || 50500;
+const UDP_TIMEOUT = 2500;      // total listen window
+const UDP_RESEND_AT = 900;     // re-broadcast once (UDP is lossy)
+const UDP_MAX_REPLY = 2048;
+const PROTOCOL_VERSION = 1;
+
 export const SERVICE_TYPE = '_nsignage._tcp.local';
 
 const TYPE = { A: 1, PTR: 12, TXT: 16, SRV: 33 };
 
-// Hostname label rules (RFC 1123) — also keeps arbitrary input out of DNS/HTTP
-const IDENTIFIER_RX = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+// Linux username rules (Debian NAME_REGEX, relaxed) — also keeps arbitrary
+// input out of DNS/HTTP. Hostname labels (RFC 1123) are a stricter subset.
+const IDENTIFIER_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
+const HOSTNAME_LABEL_RX = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+const HOSTNAME_RX = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+const DEVICE_ID_RX = /^[a-f0-9]{16}$/;
 
 export function isValidIdentifier(identifier) {
   return typeof identifier === 'string' && IDENTIFIER_RX.test(identifier);
+}
+
+// Linux usernames are lowercase on Raspberry Pi OS; compare case-insensitively
+// so phone auto-capitalisation ("Ns") does not cause a false mismatch.
+function sameUser(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 }
 
 function ipToInt(ip) {
@@ -85,6 +105,91 @@ export function isLocalNetworkIPv4(ip, ifaces = lanIPv4Interfaces()) {
   return ifaces.some(({ address, netmask }) => {
     const mask = ipToInt(netmask);
     return mask !== null && mask !== 0 && ((ipToInt(address) & mask) >>> 0) === ((target & mask) >>> 0);
+  });
+}
+
+// =============================================
+// UDP broadcast discovery (protocol v1, see N-Signage/app/discovery_responder.py)
+// Broadcasts only to the subnets this machine is directly attached to.
+// =============================================
+function directedBroadcast({ address, netmask }) {
+  const a = ipToInt(address);
+  const m = ipToInt(netmask);
+  if (a === null || m === null) return null;
+  const b = ((a & m) | (~m >>> 0)) >>> 0;
+  return [b >>> 24, (b >>> 16) & 255, (b >>> 8) & 255, b & 255].join('.');
+}
+
+// Strictly validate one reply. Returns a clean object or null.
+export function parseAnnounce(buf, rinfo, nonce, ifaces) {
+  if (buf.length > UDP_MAX_REPLY) return null;
+  let msg;
+  try { msg = JSON.parse(buf.toString('utf8')); } catch { return null; }
+  if (!msg || typeof msg !== 'object') return null;
+  if (msg.type !== 'nsignage-announce' || msg.v !== PROTOCOL_VERSION) return null;
+  if (msg.nonce !== nonce) return null;                          // stale / not ours
+  if (!isValidIdentifier(msg.pi_username)) return null;
+  if (typeof msg.hostname !== 'string' || !HOSTNAME_RX.test(msg.hostname)) return null;
+  if (typeof msg.device_id !== 'string' || !DEVICE_ID_RX.test(msg.device_id)) return null;
+  if (ipToInt(msg.ip) === null || msg.ip !== rinfo.address) return null; // must be the real sender
+  if (!isLocalNetworkIPv4(msg.ip, ifaces)) return null;
+  const port = msg.api_port === undefined ? DEFAULT_PI_PORT : msg.api_port;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return {
+    username: msg.pi_username,
+    hostname: msg.hostname,
+    deviceId: msg.device_id,
+    ip: msg.ip,
+    port,
+    protocolVersion: msg.discovery_protocol_version ?? msg.v,
+  };
+}
+
+function udpDiscover(log) {
+  return new Promise((resolve) => {
+    const ifaces = lanIPv4Interfaces();
+    const byDevice = new Map();
+    if (ifaces.length === 0) {
+      log('No active IPv4 network interface found on the helper machine.');
+      resolve([]);
+      return;
+    }
+
+    const nonce = crypto.randomBytes(16).toString('hex');
+    const packet = Buffer.from(JSON.stringify({ type: 'nsignage-discover', v: PROTOCOL_VERSION, nonce }));
+
+    const sockets = ifaces.map((iface) => {
+      const targets = [...new Set([directedBroadcast(iface), '255.255.255.255'].filter(Boolean))];
+      const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      const send = () => targets.forEach((t) => sock.send(packet, UDP_DISCOVERY_PORT, t, (err) => {
+        if (err) log(`UDP broadcast to ${t} failed on ${iface.name}: ${err.message}`);
+      }));
+
+      sock.on('error', (err) => log(`UDP socket error on ${iface.address}: ${err.message}`));
+      sock.on('message', (msg, rinfo) => {
+        const pi = parseAnnounce(msg, rinfo, nonce, ifaces);
+        if (!pi) {
+          log(`Ignored invalid discovery reply from ${rinfo.address}`);
+          return;
+        }
+        if (!byDevice.has(pi.deviceId)) {
+          log(`Reply from ${pi.ip}: user "${pi.username}", host "${pi.hostname}", id ${pi.deviceId}`);
+          byDevice.set(pi.deviceId, pi);
+        }
+      });
+      sock.bind(0, iface.address, () => {
+        try { sock.setBroadcast(true); } catch (err) { log(`setBroadcast failed on ${iface.address}: ${err.message}`); }
+        log(`UDP discovery broadcast on ${iface.name} (${iface.address}) -> ${targets.join(', ')}:${UDP_DISCOVERY_PORT}`);
+        send();
+        setTimeout(send, UDP_RESEND_AT);
+      });
+      return sock;
+    });
+
+    setTimeout(() => {
+      sockets.forEach((s) => { try { s.close(); } catch { /* already closed */ } });
+      resolve([...byDevice.values()]);
+    }, UDP_TIMEOUT);
   });
 }
 
@@ -292,42 +397,55 @@ function getJson(ip, port, path) {
   });
 }
 
-// Identity fields a V3 Pi may report in /api/status (Phase 2)
-const IDENTITY_FIELDS = ['device_id', 'pi_username', 'hostname'];
-
-async function verifyCandidate(candidate, identifier, log) {
-  const { ip, port } = candidate;
+// Ask the Pi's own Flask API who it is and whether it is serving.
+async function checkStatus(ip, port, log) {
   try {
     const status = await getJson(ip, port, '/api/status');
-    const reported = IDENTITY_FIELDS.map((f) => status?.[f]).find(Boolean);
-    if (reported && String(reported).toLowerCase().replace(/\.local$/, '') !== identifier.toLowerCase()) {
-      log(`${ip}:${port} answered but reports identity "${reported}" — not a match.`);
-      return { ...candidate, online: false, mismatch: true };
-    }
-    log(`${ip}:${port} /api/status OK${reported ? ` (identity "${reported}" confirmed)` : ' (no identity field yet — matched by hostname)'}`);
-    return { ...candidate, online: true, identityVerified: Boolean(reported), status };
+    log(`${ip}:${port} /api/status OK (pi_username "${status?.pi_username ?? '—'}")`);
+    return { online: true, status };
   } catch (err) {
     log(`${ip}:${port} /api/status failed: ${err.message}`);
-    return { ...candidate, online: false };
+    return { online: false, status: null };
   }
 }
 
-// =============================================
-// Public entry point
-// =============================================
-export async function findPi(identifier) {
-  const startedAt = Date.now();
-  const logLines = [];
-  const log = (msg) => {
-    logLines.push(`+${Date.now() - startedAt}ms ${msg}`);
-    console.log(`[PI DISCOVERY] ${msg}`);
-  };
-
-  if (!isValidIdentifier(identifier)) {
-    return { found: false, identifier, reason: 'invalid-identifier', log: ['Identifier must contain only letters, numbers and hyphens.'] };
+// Broadcast match: username already reported by the Pi. If /api/status also
+// reports a username it must agree, otherwise the address is not trusted.
+async function verifyAnnounced(pi, log) {
+  const { online, status } = await checkStatus(pi.ip, pi.port, log);
+  if (status?.pi_username && !sameUser(status.pi_username, pi.username)) {
+    log(`${pi.ip}: broadcast says "${pi.username}" but /api/status says "${status.pi_username}" — rejected.`);
+    return null;
   }
+  return { ...pi, online, method: 'udp-broadcast', identityVerified: true };
+}
 
-  log(`Looking for "${identifier}" (${SERVICE_TYPE} and ${identifier.toLowerCase()}.local)`);
+// mDNS fallback: only the hostname matched, so the username MUST come from
+// the Pi's /api/status before the address is accepted.
+async function verifyMdnsCandidate(candidate, identifier, log) {
+  const { online, status } = await checkStatus(candidate.ip, candidate.port, log);
+  if (!online || !sameUser(status?.pi_username, identifier)) {
+    log(`${candidate.ip}: username not confirmed by the Pi — not accepted.`);
+    return null;
+  }
+  return {
+    ip: candidate.ip,
+    port: candidate.port,
+    username: status.pi_username,
+    hostname: status.hostname || candidate.hostname,
+    deviceId: DEVICE_ID_RX.test(status.device_id || '') ? status.device_id : null,
+    online: true,
+    method: candidate.method,
+    identityVerified: true,
+  };
+}
+
+async function mdnsFallback(identifier, log) {
+  if (!HOSTNAME_LABEL_RX.test(identifier)) {
+    log(`"${identifier}" is not a valid hostname — mDNS fallback skipped.`);
+    return [];
+  }
+  log(`mDNS fallback: ${SERVICE_TYPE} and ${identifier.toLowerCase()}.local`);
   const records = await mdnsQuery(
     [
       { name: SERVICE_TYPE, type: TYPE.PTR },
@@ -353,36 +471,86 @@ export async function findPi(identifier) {
     seen.add(key);
     return true;
   });
-  log(`Candidates: ${candidates.length ? candidates.map((c) => `${c.ip}:${c.port} via ${c.method}`).join(', ') : 'none'}`);
+  log(`mDNS candidates: ${candidates.length ? candidates.map((c) => `${c.ip}:${c.port} via ${c.method}`).join(', ') : 'none'}`);
 
-  if (candidates.length === 0) {
-    return { found: false, identifier, reason: 'not-found', durationMs: Date.now() - startedAt, log: logLines };
+  const verified = await Promise.all(candidates.map((c) => verifyMdnsCandidate(c, identifier, log)));
+  return verified.filter(Boolean);
+}
+
+// =============================================
+// Public entry point
+// =============================================
+export async function findPi(identifier) {
+  const startedAt = Date.now();
+  const logLines = [];
+  const log = (msg) => {
+    logLines.push(`+${Date.now() - startedAt}ms ${msg}`);
+    console.log(`[PI DISCOVERY] ${msg}`);
+  };
+
+  if (!isValidIdentifier(identifier)) {
+    return { found: false, identifier, reason: 'invalid-identifier', log: ['Username may contain only letters, numbers, "_", "." and "-".'] };
   }
 
-  const verified = await Promise.all(candidates.map((c) => verifyCandidate(c, identifier, log)));
-  const best = verified.find((c) => c.online) || verified.find((c) => !c.mismatch);
+  log(`Looking for Pi with Linux username "${identifier}"`);
+  const announced = await udpDiscover(log);
+  const matching = announced.filter((pi) => sameUser(pi.username, identifier));
+  const otherCount = announced.length - matching.length;
+  log(`${announced.length} N-Signage Pi(s) answered, ${matching.length} with username "${identifier}"`);
 
-  if (!best) {
-    return { found: false, identifier, reason: 'identity-mismatch', durationMs: Date.now() - startedAt, log: logLines };
+  let devices;
+  if (matching.length > 0) {
+    devices = (await Promise.all(matching.map((pi) => verifyAnnounced(pi, log)))).filter(Boolean);
+  } else if (announced.length === 0) {
+    // Nothing answered the broadcast (responder not installed / UDP blocked)
+    devices = await mdnsFallback(identifier, log);
+  } else {
+    devices = [];
   }
 
+  // Online devices first, then stable order by IP
+  devices.sort((a, b) => (b.online - a.online) || (ipToInt(a.ip) - ipToInt(b.ip)));
+  const durationMs = Date.now() - startedAt;
+
+  if (devices.length === 0) {
+    return {
+      found: false,
+      identifier,
+      reason: otherCount > 0 ? 'username-mismatch' : 'not-found',
+      otherCount,
+      devices: [],
+      durationMs,
+      log: logLines,
+    };
+  }
+
+  // A single match is returned flat for convenience; several matches (e.g.
+  // many Pis using the same username) must be chosen by the customer.
+  const single = devices.length === 1 ? devices[0] : null;
   return {
     found: true,
     identifier,
-    ip: best.ip,
-    port: best.port,
-    hostname: best.hostname,
-    method: best.method,
-    online: best.online,
-    identityVerified: Boolean(best.identityVerified),
-    durationMs: Date.now() - startedAt,
+    multiple: devices.length > 1,
+    devices,
+    otherCount,
+    ...(single && {
+      ip: single.ip,
+      port: single.port,
+      username: single.username,
+      hostname: single.hostname,
+      deviceId: single.deviceId,
+      method: single.method,
+      online: single.online,
+      identityVerified: single.identityVerified,
+    }),
+    durationMs,
     log: logLines,
   };
 }
 
 // =============================================
 // HTTP handler — shared by the Vite middleware and the standalone server.
-// `req.url` is relative to the mount point, e.g. "/find?identifier=n-sinage".
+// `req.url` is relative to the mount point, e.g. "/find?identifier=ns".
 // =============================================
 export function discoveryRequestHandler(req, res) {
   const url = new URL(req.url || '/', 'http://localhost');
@@ -405,7 +573,7 @@ export function discoveryRequestHandler(req, res) {
 
   const identifier = (url.searchParams.get('identifier') || '').trim();
   if (!isValidIdentifier(identifier)) {
-    send(400, { found: false, reason: 'invalid-identifier', error: 'Use letters, numbers and hyphens only (e.g. n-sinage).' });
+    send(400, { found: false, reason: 'invalid-identifier', error: 'Enter the Pi\'s Linux username (letters, numbers, "_", "." or "-"), e.g. ns.' });
     return;
   }
 

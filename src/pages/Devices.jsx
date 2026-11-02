@@ -1,7 +1,7 @@
 // =============================================
 // N Signage — Devices Page
 // =============================================
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   Plus,
@@ -15,6 +15,8 @@ import {
   X,
   Tag,
   Network,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 import { getDevices, saveDevice, updateDevice, deleteDevice } from '../data/store';
 import { getPiStatus } from '../api/piApi';
@@ -28,6 +30,13 @@ const EMPTY_FORM = {
   ip: '',
 };
 
+// Linux username (same rule as the discovery helper) and a strict IPv4 check
+const USERNAME_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
+const IPV4_RX = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+const sameUser = (a, b) =>
+  typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+
 export default function Devices() {
   const location = useLocation();
   const [devices, setDevices] = useState(() => getDevices());
@@ -40,6 +49,11 @@ export default function Devices() {
   const [testResults, setTestResults] = useState({});
   const [testingId, setTestingId] = useState(null);
   const [searchQ, setSearchQ] = useState('');
+  const [discovered, setDiscovered] = useState(null); // Pi verified by Find Pi
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+  const formSession = useRef(0);
 
   const reload = () => setDevices(getDevices());
 
@@ -60,6 +74,10 @@ export default function Devices() {
 
   function openEdit(device) {
     setEditId(device.id);
+    setDiscovered(null);
+    setFormError('');
+    setSubmitting(false);
+    formSession.current += 1;
     setForm({
       deviceId: device.deviceId || '',
       nickName: device.nickName || '',
@@ -71,39 +89,113 @@ export default function Devices() {
 
   function openAdd() {
     setEditId(null);
+    setDiscovered(null);
+    setFormError('');
+    setSubmitting(false);
+    formSession.current += 1;
     setForm(EMPTY_FORM);
     setErrors({});
     setShowForm(true);
   }
 
   function closeForm() {
+    formSession.current += 1; // abandon any Add Device verification in flight
     setShowForm(false);
     setEditId(null);
     setForm(EMPTY_FORM);
     setErrors({});
+    setDiscovered(null);
+    setSubmitting(false);
+    setFormError('');
   }
 
   function validate() {
     const e = {};
     if (!form.deviceId.trim()) e.deviceId = 'Pi Username / Device Identifier is required';
+    else if (!editId && !USERNAME_RX.test(form.deviceId.trim()))
+      e.deviceId = 'Enter the Pi\'s Linux username (letters, numbers, "_", "." or "-"), e.g. ns';
 
     const ipRx = /^(\d{1,3}\.){3}\d{1,3}$/;
     if (!form.ip.trim()) e.ip = 'IP address is required';
-    else if (!ipRx.test(form.ip.trim())) e.ip = 'Enter a valid IPv4 address (e.g. 10.10.40.94)';
+    else if (!ipRx.test(form.ip.trim()) || (!editId && !IPV4_RX.test(form.ip.trim())))
+      e.ip = 'Enter a valid IPv4 address (e.g. 10.10.40.94)';
     return e;
+  }
+
+  // Add Device: confirm the Pi at this IP is reachable and really is the
+  // entered Linux user before using the existing registration (saveDevice).
+  async function registerNewDevice() {
+    const username = form.deviceId.trim();
+    const ip = form.ip.trim();
+    const session = formSession.current;
+    const current = getDevices();
+
+    const sameIp = current.find(d => d.ip?.trim() === ip);
+    if (sameIp) {
+      setFormError(`A device with IP ${ip} is already registered (${sameIp.nickName || sameIp.deviceId}).`);
+      return;
+    }
+
+    setSubmitting(true);
+    setFormError('');
+    const status = await getPiStatus(ip);
+    if (session !== formSession.current) return; // form was closed meanwhile
+
+    if (!status.ok) {
+      setSubmitting(false);
+      setFormError(`Could not reach the Raspberry Pi at ${ip}. Check that it is powered on, on the same Wi-Fi, and that the IP address is correct. (${status.error})`);
+      return;
+    }
+
+    // Username must come from the Pi itself: /api/status, or the Find Pi
+    // broadcast reply for this exact IP (Pis running older N-Signage builds).
+    const reported = status.data?.pi_username;
+    const verifiedByDiscovery = discovered && discovered.ip === ip && sameUser(discovered.username, username);
+    if (reported ? !sameUser(reported, username) : !verifiedByDiscovery) {
+      setSubmitting(false);
+      setFormError(
+        reported
+          ? `The Raspberry Pi at ${ip} reports the username "${reported}", not "${username}". Check the username or the IP address.`
+          : `The Raspberry Pi at ${ip} did not confirm its username. Use Find Pi, or update the N-Signage software on the Pi.`
+      );
+      return;
+    }
+
+    const piDeviceId = status.data?.device_id || (verifiedByDiscovery ? discovered.deviceId : undefined);
+    const sameHardware = piDeviceId && current.find(d => d.piDeviceId === piDeviceId);
+    if (sameHardware) {
+      setSubmitting(false);
+      setFormError(`This Raspberry Pi is already registered as "${sameHardware.nickName || sameHardware.deviceId}" (${sameHardware.ip}). Edit that device to change its IP address.`);
+      return;
+    }
+
+    const hostname = status.data?.hostname || (verifiedByDiscovery ? discovered.hostname : undefined);
+    const saved = saveDevice({
+      deviceId: reported || discovered.username,
+      nickName: form.nickName.trim(),
+      ip,
+      ...(hostname && { hostname }),
+      ...(piDeviceId && { piDeviceId }),
+    });
+    reload();
+    closeForm();
+    setSuccessMsg(`${saved.nickName || saved.deviceId} (${saved.ip}) was added successfully.`);
   }
 
   function handleSubmit(e) {
     e.preventDefault();
+    if (submitting) return;
     const errs = validate();
     if (Object.keys(errs).length > 0) {
       setErrors(errs);
       return;
     }
+    setErrors({});
     if (editId) {
       updateDevice(editId, form);
     } else {
-      saveDevice(form);
+      registerNewDevice();
+      return;
     }
     reload();
     closeForm();
@@ -154,6 +246,20 @@ export default function Devices() {
           </button>
         </div>
       </div>
+
+      {successMsg && (
+        <div className="alert alert-success" style={{ marginBottom: 'var(--space-4)' }}>
+          <CheckCircle2 size={15} className="alert-icon" />
+          <span style={{ flex: 1 }}>{successMsg}</span>
+          <button
+            className="btn btn-ghost btn-icon btn-sm"
+            onClick={() => setSuccessMsg('')}
+            aria-label="Dismiss"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
 
       {/* Filter and Stats Toolbar */}
       <div
@@ -451,7 +557,10 @@ export default function Devices() {
                     className="form-input"
                     placeholder="e.g. n-sinage"
                     value={form.deviceId}
-                    onChange={e => setForm(f => ({ ...f, deviceId: e.target.value }))}
+                    onChange={e => {
+                      setForm(f => ({ ...f, deviceId: e.target.value }));
+                      setDiscovered(null);
+                    }}
                   />
                   {errors.deviceId && <span className="form-error">{errors.deviceId}</span>}
                   <span className="form-hint">Host identifier configured on your Raspberry Pi</span>
@@ -473,6 +582,7 @@ export default function Devices() {
                   key={form.deviceId.trim()}
                   identifier={form.deviceId}
                   onUseIp={ip => setForm(f => ({ ...f, ip }))}
+                  onFound={setDiscovered}
                 />
 
                 {/* IP Address */}
@@ -488,14 +598,26 @@ export default function Devices() {
                   {errors.ip && <span className="form-error">{errors.ip}</span>}
                   <span className="form-hint">Static or DHCP assigned local IPv4 address</span>
                 </div>
+
+                {formError && (
+                  <div className="alert alert-danger" style={{ fontSize: 'var(--text-xs)' }}>
+                    <AlertTriangle size={14} className="alert-icon" />
+                    <span>{formError}</span>
+                  </div>
+                )}
               </div>
 
               <div className="modal-footer">
                 <button type="button" className="btn btn-secondary" onClick={closeForm}>
                   Cancel
                 </button>
-                <button type="submit" className="btn btn-primary">
-                  {editId ? 'Save Changes' : 'Add Device'}
+                <button type="submit" className="btn btn-primary" disabled={submitting}>
+                  {submitting ? (
+                    <>
+                      <Loader2 size={14} className="spinner" style={{ border: 'none', animation: 'spin 0.8s linear infinite' }} />
+                      Verifying Raspberry Pi...
+                    </>
+                  ) : editId ? 'Save Changes' : 'Add Device'}
                 </button>
               </div>
             </form>

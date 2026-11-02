@@ -40,7 +40,7 @@ function normalizeError(error, context = 'Operation') {
     const status = error.response.status;
     const data = error.response.data;
     const msg = data?.error || data?.message || data;
-    if (status === 404) return `${context} failed: File or resource not found on the Pi.`;
+    if (status === 404) return `${context} failed: The upload endpoint (/api/upload) was not found on the Pi (HTTP 404). Ensure the Pi is running the latest N-Signage Flask server.`;
     if (status === 500) return `${context} failed: Pi server error — ${msg || 'unknown error'}.`;
     if (status === 413) return `${context} failed: File too large for the Pi to accept.`;
     return `${context} failed (HTTP ${status}): ${msg || 'Unknown server error'}.`;
@@ -92,9 +92,11 @@ export async function getPiMedia(ip, port = DEFAULT_PORT) {
       timeout: DEFAULT_TIMEOUT,
     });
     // Accept array or { media: [...] } shaped responses
-    const mediaList = Array.isArray(res.data)
+    const rawList = Array.isArray(res.data)
       ? res.data
       : res.data?.media || res.data?.files || [];
+    // Older Pi servers return plain filename strings — normalize to objects
+    const mediaList = rawList.map((m) => (typeof m === 'string' ? { name: m } : m));
     return { ok: true, data: mediaList };
   } catch (error) {
     return { ok: false, error: normalizeError(error, 'Fetch media') };
@@ -130,8 +132,11 @@ export async function uploadMedia(ip, file, onProgress = null, port = DEFAULT_PO
   const formData = new FormData();
   formData.append('file', file);
 
+  const uploadUrl = `${piUrl(ip, port)}/api/upload`;
+
   try {
-    const res = await axios.post(`${piUrl(ip, port)}/api/upload`, formData, {
+    console.log(`[piApi] Uploading to: ${uploadUrl} (file: ${file.name}, size: ${file.size})`);
+    const res = await axios.post(uploadUrl, formData, {
       timeout: UPLOAD_TIMEOUT,
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (progressEvent) => {
@@ -141,8 +146,16 @@ export async function uploadMedia(ip, file, onProgress = null, port = DEFAULT_PO
         }
       },
     });
+    console.log(`[piApi] Upload success:`, res.data);
     return { ok: true, data: res.data };
   } catch (error) {
+    console.error(`[piApi] Upload failed:`, {
+      url: uploadUrl,
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message,
+      code: error.code,
+    });
     return { ok: false, error: normalizeError(error, 'Upload') };
   }
 }

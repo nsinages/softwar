@@ -138,7 +138,7 @@ input, select, textarea {
   justify-content: center;
   color: #ffffff;
   flex-shrink: 0;
-  box-shadow: 0 2px 4px rgba(10, 119, 88, 0.25);
+  box-shadow: 0 2px 4px rgba(244, 119, 33, 0.25);
 }
 
 .brand-text {
@@ -508,7 +508,7 @@ input, select, textarea {
   background: var(--accent);
   color: var(--text-inverse);
   border-color: var(--accent);
-  box-shadow: 0 1px 2px 0 rgba(10, 119, 88, 0.2);
+  box-shadow: 0 1px 2px 0 rgba(244, 119, 33, 0.2);
 }
 .btn-primary:hover:not(:disabled) {
   background: var(--accent-hover);
@@ -704,7 +704,7 @@ tbody tr:hover {
 .badge-success { background: var(--success-subtle); color: var(--success); border: 1px solid rgba(16, 185, 129, 0.2); }
 .badge-danger { background: var(--danger-subtle); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.2); }
 .badge-warning { background: var(--warning-subtle); color: var(--warning); border: 1px solid rgba(245, 158, 11, 0.2); }
-.badge-accent { background: var(--accent-subtle); color: var(--accent); border: 1px solid rgba(10, 119, 88, 0.2); }
+.badge-accent { background: var(--accent-subtle); color: var(--accent); border: 1px solid rgba(244, 119, 33, 0.2); }
 .badge-info { background: var(--info-subtle); color: var(--info); border: 1px solid rgba(2, 132, 199, 0.2); }
 .badge-neutral { background: var(--bg-elevated); color: var(--text-secondary); border: 1px solid var(--border); }
 
@@ -807,7 +807,7 @@ tbody tr:hover {
 .alert-success { background: var(--success-subtle); color: var(--success); border-color: rgba(16, 185, 129, 0.25); }
 .alert-danger  { background: var(--danger-subtle); color: var(--danger); border-color: rgba(239, 68, 68, 0.25); }
 .alert-warning { background: var(--warning-subtle); color: var(--warning); border-color: rgba(245, 158, 11, 0.25); }
-.alert-info    { background: var(--accent-subtle); color: var(--accent); border-color: rgba(10, 119, 88, 0.25); }
+.alert-info    { background: var(--accent-subtle); color: var(--accent); border-color: rgba(244, 119, 33, 0.25); }
 
 /* --- Grid Layouts --- */
 .device-grid {

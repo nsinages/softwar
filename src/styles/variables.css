@@ -3,40 +3,41 @@
    ============================================= */
 
 :root {
-  /* === Colors: Commercial SaaS Palette === */
-  --primary: #0A7758;
-  --primary-hover: #086147;
-  --primary-light: #e6f4f0;
-  --primary-dark: #064e3b;
+  /* === Colors: Orange Brand Palette === */
+  --primary: #F47721;        /* Primary Orange — brand, buttons, highlights */
+  --primary-hover: #C64B08;  /* Burnt Orange — hover, accents */
+  --primary-light: #FFF0E5;  /* Pale Orange — light sections, subtle highlights */
+  --primary-dark: #C64B08;
+  --primary-bright: #FF8200; /* Bright Orange — secondary highlights, CTA accents */
 
-  --black: #0f172a;
-  --background: #f8fafc;
+  --black: #171717;
+  --background: #ffffff;
   --white: #ffffff;
-  --gray: #64748b;
-  --border: #e2e8f0;
+  --gray: #666666;
+  --border: #ececec;
 
   /* === Semantic theme tokens (Light Mode) === */
-  --bg-base: #f8fafc;
+  --bg-base: #ffffff;
   --bg-surface: #ffffff;
-  --bg-elevated: #f1f5f9;
+  --bg-elevated: #FFF0E5;
   --bg-card: #ffffff;
-  --bg-hover: #f1f5f9;
+  --bg-hover: #FFF0E5;
   --bg-sidebar: #ffffff;
-  --bg-sidebar-active: #e6f4f0;
+  --bg-sidebar-active: #FFF0E5;
 
-  --border-color: #e2e8f0;
-  --border-subtle: #f1f5f9;
-  --border-strong: #cbd5e1;
+  --border-color: #ececec;
+  --border-subtle: #f5f5f5;
+  --border-strong: #d4d4d4;
 
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #64748b;
+  --text-primary: #171717;
+  --text-secondary: #666666;
+  --text-muted: #666666;
   --text-inverse: #ffffff;
 
-  --accent: #0A7758;
-  --accent-hover: #086147;
-  --accent-subtle: rgba(10, 119, 88, 0.08);
-  --accent-glow: rgba(10, 119, 88, 0.2);
+  --accent: #F47721;
+  --accent-hover: #C64B08;
+  --accent-subtle: rgba(244, 119, 33, 0.08);
+  --accent-glow: rgba(244, 119, 33, 0.2);
 
   --success: #10b981;
   --success-hover: #059669;
@@ -118,28 +119,28 @@
 
 /* === Light Mode Explicit Override === */
 [data-theme="light"] {
-  --bg-base: #f8fafc;
+  --bg-base: #ffffff;
   --bg-surface: #ffffff;
-  --bg-elevated: #f1f5f9;
+  --bg-elevated: #FFF0E5;
   --bg-card: #ffffff;
-  --bg-hover: #f1f5f9;
+  --bg-hover: #FFF0E5;
   --bg-sidebar: #ffffff;
-  --bg-sidebar-active: #e6f4f0;
+  --bg-sidebar-active: #FFF0E5;
 
-  --border: #e2e8f0;
-  --border-color: #e2e8f0;
-  --border-subtle: #f1f5f9;
-  --border-strong: #cbd5e1;
+  --border: #ececec;
+  --border-color: #ececec;
+  --border-subtle: #f5f5f5;
+  --border-strong: #d4d4d4;
 
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #64748b;
+  --text-primary: #171717;
+  --text-secondary: #666666;
+  --text-muted: #666666;
   --text-inverse: #ffffff;
 
-  --accent: #0A7758;
-  --accent-hover: #086147;
-  --accent-subtle: rgba(10, 119, 88, 0.08);
-  --accent-glow: rgba(10, 119, 88, 0.2);
+  --accent: #F47721;
+  --accent-hover: #C64B08;
+  --accent-subtle: rgba(244, 119, 33, 0.08);
+  --accent-glow: rgba(244, 119, 33, 0.2);
 
   --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.06), 0 1px 2px -1px rgba(0, 0, 0, 0.06);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
@@ -148,28 +149,28 @@
 
 /* === Dark Mode Override === */
 [data-theme="dark"] {
-  --bg-base: #0b0f19;
-  --bg-surface: #111827;
-  --bg-elevated: #1e293b;
-  --bg-card: #111827;
-  --bg-hover: #1e293b;
-  --bg-sidebar: #0e1526;
-  --bg-sidebar-active: rgba(16, 185, 129, 0.12);
+  --bg-base: #0d0d0d;
+  --bg-surface: #171717;
+  --bg-elevated: #222222;
+  --bg-card: #171717;
+  --bg-hover: #222222;
+  --bg-sidebar: #171717;
+  --bg-sidebar-active: rgba(244, 119, 33, 0.14);
 
-  --border: #1e293b;
-  --border-color: #1e293b;
-  --border-subtle: #192237;
-  --border-strong: #334155;
+  --border: #262626;
+  --border-color: #262626;
+  --border-subtle: #1f1f1f;
+  --border-strong: #3a3a3a;
 
-  --text-primary: #f8fafc;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --text-inverse: #0f172a;
+  --text-primary: #ffffff;
+  --text-secondary: #b3b3b3;
+  --text-muted: #8a8a8a;
+  --text-inverse: #ffffff;
 
-  --accent: #10b981;
-  --accent-hover: #34d399;
-  --accent-subtle: rgba(16, 185, 129, 0.12);
-  --accent-glow: rgba(16, 185, 129, 0.25);
+  --accent: #FF8200;
+  --accent-hover: #F47721;
+  --accent-subtle: rgba(255, 130, 0, 0.12);
+  --accent-glow: rgba(255, 130, 0, 0.25);
 
   --success: #10b981;
   --success-hover: #34d399;

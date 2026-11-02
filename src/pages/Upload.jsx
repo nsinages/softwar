@@ -568,7 +568,7 @@ export default function Upload() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
           {/* Target Summary Card */}
           {selectedDevices.length > 0 && (
-            <div className="card" style={{ borderColor: 'rgba(10, 119, 88, 0.3)', background: 'var(--bg-card)' }}>
+            <div className="card" style={{ borderColor: 'rgba(244, 119, 33, 0.3)', background: 'var(--bg-card)' }}>
               <div
                 style={{
                   fontWeight: 'var(--weight-semibold)',

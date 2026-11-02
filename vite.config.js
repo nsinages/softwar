@@ -49,9 +49,11 @@ function piProxyPlugin() {
             path: `/${path}`,
             method: req.method || 'GET',
             headers: forwardHeaders,
-            timeout: 10000
+            // Use a longer timeout for upload requests (file transfers)
+            timeout: ((req.method === 'POST' || req.method === 'PUT') && path.includes('upload')) ? 300000 : 15000
           },
           (proxyRes) => {
+            console.log(`[PI PROXY RESPONSE] ${ip}:${port}/${path} -> HTTP ${proxyRes.statusCode}`)
             // Also strip hop-by-hop from the response before sending to browser
             const resHeaders = {}
             for (const [k, v] of Object.entries(proxyRes.headers)) {
