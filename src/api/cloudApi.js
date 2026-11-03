@@ -51,10 +51,15 @@ export async function cloudFindPi(identifier) {
     return { log: [], devices: [], ...res.data };
   } catch (error) {
     const data = error.response?.data;
+    const status = error.response?.status;
+    // 503 = relay up but its storage is not configured/reachable; no response = network/timeout
+    const reason = data?.reason || (status === 503 ? 'cloud-not-configured' : status ? 'cloud-error' : 'cloud-unreachable');
+    console.error(`[PI DISCOVERY] /api/find failed (${status || error.code || 'network'}): ${data?.error || error.message}`);
     return {
       found: false,
       identifier,
-      reason: data?.reason || 'helper-unavailable',
+      reason,
+      status,
       error: data?.error || cloudError(error, 'Cloud search'),
       devices: [],
       log: [...(data?.log || []), cloudError(error, 'Cloud search')],

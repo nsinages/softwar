@@ -35,6 +35,8 @@ export default async function handler(req, res) {
       `${all.length} Pi(s) registered with this username, ${devices.length} on your network`,
     ];
 
+    console.log('[N-SIGNAGE CLOUD] find', JSON.stringify({ identifier, registered: all.length, nearby: devices.length }));
+
     if (devices.length === 0) {
       send(res, 200, {
         found: false,

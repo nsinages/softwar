@@ -658,7 +658,12 @@ export default function Devices() {
                 <button type="button" className="btn btn-secondary" onClick={closeForm}>
                   Cancel
                 </button>
-                <button type="submit" className="btn btn-primary" disabled={submitting}>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={submitting || (!editId && !discovered)}
+                  title={!editId && !discovered ? 'Click "Find Pi" first' : undefined}
+                >
                   {submitting ? (
                     <>
                       <Loader2 size={14} className="spinner" style={{ border: 'none', animation: 'spin 0.8s linear infinite' }} />

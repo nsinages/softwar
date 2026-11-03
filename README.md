@@ -45,12 +45,18 @@ In the Vercel project → **Storage**:
 2. **Create / connect a Blob store** with **public** access.
    This adds `BLOB_READ_WRITE_TOKEN`.
 3. Redeploy.
+4. Check: `curl https://software.nsinages.in/api/health` → `{"ok":true,"redis":{"configured":true,"reachable":true},...}`.
+   If `/api/find` returns HTTP 503 `cloud-not-configured`, step 1 is missing.
 
 ### On every Raspberry Pi
 
+Run from the N-Signage folder on the Pi, as the Pi's normal user (the user
+customers type into Find Pi). The unit is rewritten for that user and folder:
+
 ```bash
-sudo cp n-signage-cloud.service /etc/systemd/system/
-# edit User= and the paths if the Pi user is not "nsignage"
+PIUSER=$(id -un); PIDIR=$(pwd)
+sed -e "s|^User=.*|User=$PIUSER|" -e "s|/home/nsignage/n-signage|$PIDIR|g" \
+  n-signage-cloud.service | sudo tee /etc/systemd/system/n-signage-cloud.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now n-signage-cloud.service
 journalctl -u n-signage-cloud -f      # expect "Connected to the cloud"

@@ -33,8 +33,12 @@ export function redis() {
   const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) {
+    // Names only — never log the values.
+    console.error('[N-SIGNAGE CLOUD] Redis not configured: missing',
+      [!url && 'KV_REST_API_URL/UPSTASH_REDIS_REST_URL', !token && 'KV_REST_API_TOKEN/UPSTASH_REDIS_REST_TOKEN'].filter(Boolean).join(', '));
     const err = new Error('Cloud storage is not configured. Connect an Upstash Redis store to this Vercel project.');
     err.status = 503;
+    err.reason = 'cloud-not-configured';
     throw err;
   }
   redisClient = new Redis({ url, token });
@@ -94,8 +98,19 @@ export function send(res, status, body) {
 
 export function handleError(res, err) {
   const status = err.status || 500;
-  if (status >= 500) console.error('[N-SIGNAGE CLOUD]', err);
-  send(res, status, { ok: false, error: status >= 500 && !err.status ? 'Cloud server error' : err.message });
+  if (status >= 500) console.error('[N-SIGNAGE CLOUD]', status, err.reason || '', err.message);
+  send(res, status, {
+    ok: false,
+    error: status >= 500 && !err.status ? 'Cloud server error' : err.message,
+    ...(err.reason && { reason: err.reason }),
+  });
+}
+
+export function redisConfigured() {
+  return Boolean(
+    (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
+    (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN)
+  );
 }
 
 export function httpError(status, message) {

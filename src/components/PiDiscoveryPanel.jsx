@@ -38,16 +38,28 @@ const detailGridStyle = {
   borderRadius: 'var(--radius-sm)',
 };
 
-function OnlineStatus({ online }) {
+function OnlineStatus({ online, method }) {
+  const offlineText = method === 'cloud'
+    ? 'Offline — the Pi has not contacted the cloud in the last minute'
+    : 'Found, but the N-Signage API is not responding';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
       <span className={`dot ${online ? 'dot-online' : 'dot-offline'}`} />
       <span style={{ color: online ? 'var(--success)' : 'var(--warning)', fontWeight: 'var(--weight-medium)' }}>
-        {online ? 'Online' : 'Found, but the N-Signage API is not responding'}
+        {online ? 'Online' : offlineText}
       </span>
     </div>
   );
 }
+
+// Why the search failed, in words the customer can act on.
+const FAILURE_TEXT = {
+  'helper-unavailable': 'The search timed out or the local network discovery helper is currently unreachable.',
+  'cloud-not-configured': 'The N-Signage cloud service is not available right now (server storage is not configured). This is a website problem, not a problem with your Pi — contact your administrator.',
+  'cloud-unreachable': 'Could not reach the N-Signage cloud service. Check this computer\'s internet connection and try again.',
+  'cloud-error': 'The N-Signage cloud service returned an error.',
+  'not-found': 'No Raspberry Pi with this username has connected to the cloud from this network in the last 15 minutes.',
+};
 
 /**
  * @param {string}   identifier - Pi Linux username typed in the form
@@ -187,13 +199,16 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
             <span style={{ color: 'var(--text-muted)' }}>Hostname:</span>
             <span style={{ fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)' }}>{selected.hostname || '—'}</span>
 
+            <span style={{ color: 'var(--text-muted)' }}>Device ID:</span>
+            <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{selected.deviceId || '—'}</span>
+
             <span style={{ color: 'var(--text-muted)' }}>IP Address:</span>
             <div>
-              <span className="ip-chip">{selected.ip}</span>
+              <span className="ip-chip">{selected.ip || '—'}</span>
             </div>
 
             <span style={{ color: 'var(--text-muted)' }}>Status:</span>
-            <OnlineStatus online={selected.online} />
+            <OnlineStatus online={selected.online} method={selected.method} />
           </div>
 
           <span className="form-hint">
@@ -220,7 +235,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
                 <span style={{ fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)' }}>{d.hostname || d.username}</span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <span className="ip-chip">{d.ip}</span>
-                  <OnlineStatus online={d.online} />
+                  <OnlineStatus online={d.online} method={d.method} />
                 </div>
               </div>
               <button type="button" className="btn btn-primary btn-sm" onClick={() => choose(d)}>
@@ -253,6 +268,11 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
             </div>
           )}
 
+          {result?.reason === 'not-found' && (
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>{FAILURE_TEXT['not-found']}</div>
+          )}
+
+          {!['cloud-not-configured', 'cloud-error'].includes(result?.reason) && (
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
             <div style={{ fontWeight: 'var(--weight-medium)', marginBottom: 4, color: 'var(--text-primary)' }}>
               Make sure:
@@ -264,10 +284,16 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
               <li>The username is the Pi's Linux username (e.g. <code>ns</code>).</li>
             </ul>
           </div>
+          )}
 
-          {result?.reason === 'helper-unavailable' && (
+          {FAILURE_TEXT[result?.reason] && result.reason !== 'not-found' && (
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', background: 'var(--bg-elevated)', padding: '6px 10px', borderRadius: 'var(--radius-sm)' }}>
-              The search timed out or the local network discovery helper is currently unreachable.
+              {FAILURE_TEXT[result.reason]}
+              {result.error && result.reason !== 'helper-unavailable' && (
+                <div style={{ marginTop: 4, fontFamily: 'var(--font-mono)' }}>
+                  {result.status ? `HTTP ${result.status}: ` : ''}{result.error}
+                </div>
+              )}
             </div>
           )}
 
