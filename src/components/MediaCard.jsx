@@ -9,8 +9,8 @@ import {
   Play,
   Trash2,
   Eye,
-  CheckCircle2,
 } from 'lucide-react';
+import { piMediaUrl } from '../api/piApi';
 
 const IMAGE_EXTS = /\.(jpg|jpeg|png|gif|webp)$/i;
 const VIDEO_EXTS = /\.(mp4|m4v|webm|mov)$/i;
@@ -41,10 +41,10 @@ function formatDate(dateStr) {
   }
 }
 
-export default function MediaCard({ media, piIp, isCurrent, onDelete, onPreview }) {
+export default function MediaCard({ media, device, isCurrent, onDelete, onPreview }) {
   const mediaType = getMediaType(media.filename || media.name);
   const filename = media.filename || media.name || 'unknown';
-  const previewUrl = piIp ? `http://${piIp}:5000/media/${encodeURIComponent(filename)}` : null;
+  const previewUrl = device ? piMediaUrl(device, filename) : null;
 
   return (
     <div
@@ -77,6 +77,7 @@ export default function MediaCard({ media, piIp, isCurrent, onDelete, onPreview 
           <img
             src={previewUrl}
             alt={filename}
+            loading="lazy"
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
             onError={e => {
               e.currentTarget.style.display = 'none';

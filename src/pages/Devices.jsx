@@ -2,7 +2,7 @@
 // N Signage — Devices Page
 // =============================================
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Plus,
   Search,
@@ -10,11 +10,9 @@ import {
   Pencil,
   Trash2,
   Tv,
-  Film,
   Loader2,
   X,
   Tag,
-  Network,
   AlertTriangle,
   CheckCircle2,
 } from 'lucide-react';
@@ -39,6 +37,7 @@ const sameUser = (a, b) =>
 
 export default function Devices() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [devices, setDevices] = useState(() => getDevices());
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState(null);
@@ -70,6 +69,9 @@ export default function Devices() {
       const d = devices.find(x => x.id === location.state.deleteId);
       if (d) setDeleteTarget(d);
     }
+    // Consume the one-shot navigation state so a page refresh does not re-open it
+    if (location.state) navigate(location.pathname, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.state]);
 
   function openEdit(device) {
@@ -112,13 +114,16 @@ export default function Devices() {
   function validate() {
     const e = {};
     if (!form.deviceId.trim()) e.deviceId = 'Pi Username / Device Identifier is required';
-    else if (!editId && !USERNAME_RX.test(form.deviceId.trim()))
+    else if (!USERNAME_RX.test(form.deviceId.trim()))
       e.deviceId = 'Enter the Pi\'s Linux username (letters, numbers, "_", "." or "-"), e.g. ns';
 
-    const ipRx = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (form.nickName.trim().length > 64) e.nickName = 'Nickname must be 64 characters or fewer';
+
     if (!form.ip.trim()) e.ip = 'IP address is required';
-    else if (!ipRx.test(form.ip.trim()) || (!editId && !IPV4_RX.test(form.ip.trim())))
+    else if (!IPV4_RX.test(form.ip.trim()))
       e.ip = 'Enter a valid IPv4 address (e.g. 10.10.40.94)';
+    else if (getDevices().some(d => d.id !== editId && d.ip?.trim() === form.ip.trim()))
+      e.ip = 'Another device is already registered with this IP address';
     return e;
   }
 
@@ -138,7 +143,7 @@ export default function Devices() {
 
     setSubmitting(true);
     setFormError('');
-    const status = await getPiStatus(ip);
+    const status = await getPiStatus({ ip });
     if (session !== formSession.current) return; // form was closed meanwhile
 
     if (!status.ok) {
@@ -192,7 +197,11 @@ export default function Devices() {
     }
     setErrors({});
     if (editId) {
-      updateDevice(editId, form);
+      updateDevice(editId, {
+        deviceId: form.deviceId.trim(),
+        nickName: form.nickName.trim(),
+        ip: form.ip.trim(),
+      });
     } else {
       registerNewDevice();
       return;
@@ -215,7 +224,7 @@ export default function Devices() {
   async function handleTest(device) {
     setTestingId(device.id);
     setTestResults(r => ({ ...r, [device.id]: null }));
-    const result = await getPiStatus(device.ip);
+    const result = await getPiStatus(device);
     setTestResults(r => ({ ...r, [device.id]: result }));
     setTestingId(null);
   }
@@ -573,8 +582,10 @@ export default function Devices() {
                     className="form-input"
                     placeholder="e.g. Main Lobby Display, Room 101"
                     value={form.nickName}
+                    maxLength={64}
                     onChange={e => setForm(f => ({ ...f, nickName: e.target.value }))}
                   />
+                  {errors.nickName && <span className="form-error">{errors.nickName}</span>}
                 </div>
 
                 {/* V3 Discovery Panel */}

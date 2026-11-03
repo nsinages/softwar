@@ -1,7 +1,7 @@
 // =============================================
 // N Signage — App Root Shell
 // =============================================
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import { ArrowLeft, Compass } from 'lucide-react';
 import Sidebar from './components/Sidebar';
@@ -11,45 +11,21 @@ import Devices from './pages/Devices';
 import Media from './pages/Media';
 import Upload from './pages/Upload';
 import Settings from './pages/Settings';
-import { getDevices, getSettings, saveSettings } from './data/store';
-import { checkAllDevices } from './api/piApi';
+import { getDevices } from './data/store';
+import { usePiStatus } from './hooks/usePiStatus';
 
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [theme, setTheme] = useState(() => getSettings().theme || 'light');
-  const [statusMap, setStatusMap] = useState({});
-  const [lastSync, setLastSync] = useState(null);
+  const { statusMap } = usePiStatus();
 
-  // Apply theme to document
+  // Light theme only
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-  }, [theme]);
-
-  // Status poll for TopBar & global counters
-  useEffect(() => {
-    async function poll() {
-      const devices = getDevices();
-      if (devices.length === 0) return;
-      const results = await checkAllDevices(devices);
-      setStatusMap(results);
-      setLastSync(new Date());
-    }
-    poll();
-    const settings = getSettings();
-    const interval = (settings.pollInterval || 30) * 1000;
-    const timer = setInterval(poll, interval);
-    return () => clearInterval(timer);
+    document.documentElement.setAttribute('data-theme', 'light');
   }, []);
 
-  function toggleTheme() {
-    const next = theme === 'dark' ? 'light' : 'dark';
-    setTheme(next);
-    saveSettings({ ...getSettings(), theme: next });
-  }
-
-  const devices = useMemo(() => getDevices(), []);
-  const onlineCount = Object.values(statusMap).filter(s => s?.ok).length;
+  const devices = getDevices();
+  const onlineCount = devices.filter(d => statusMap[d.id]?.ok).length;
 
   return (
     <BrowserRouter>
@@ -62,11 +38,8 @@ export default function App() {
         />
         <div className="main-content">
           <TopBar
-            theme={theme}
-            onThemeToggle={toggleTheme}
             onlineCount={onlineCount}
             totalCount={devices.length}
-            lastSync={lastSync}
             onMobileMenuToggle={() => setMobileSidebarOpen(o => !o)}
           />
           <main className="page-body">

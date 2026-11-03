@@ -1,7 +1,7 @@
 // =============================================
 // N Signage — UploadPanel Component
 // =============================================
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   UploadCloud,
   File,
@@ -11,34 +11,36 @@ import {
   Film,
   Image as ImageIcon,
 } from 'lucide-react';
+import { ALLOWED_EXT, ALLOWED_TYPES } from '../api/piApi';
+import { getSettings } from '../data/store';
 
-const ALLOWED_EXTS = /\.(jpg|jpeg|png|gif|webp|mp4|m4v|webm|mov)$/i;
-const ALLOWED_TYPES = [
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-  'video/mp4',
-  'video/x-m4v',
-  'video/webm',
-  'video/quicktime',
-];
-const WARN_SIZE_MB = 500;
-
-export default function UploadPanel({ onFileSelect, selectedFile }) {
+export default function UploadPanel({ onFileSelect, selectedFile, disabled = false }) {
   const inputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
+  const [previewUrl, setPreviewUrl] = useState('');
+  const warnSizeMB = getSettings().uploadSizeWarning;
+
+  // One object URL per selected file, released when the file changes
+  useEffect(() => {
+    if (!selectedFile) return undefined;
+    const url = URL.createObjectURL(selectedFile);
+    setPreviewUrl(url);
+    return () => {
+      URL.revokeObjectURL(url);
+      setPreviewUrl('');
+    };
+  }, [selectedFile]);
 
   function validateAndSelect(file) {
-    if (!file) return;
+    if (!file || disabled) return;
     setError('');
-    if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXTS.test(file.name)) {
+    if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXT.test(file.name)) {
       setError(`Unsupported format: "${file.name}". Allowed: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV`);
       return;
     }
     const sizeMB = file.size / (1024 * 1024);
-    if (sizeMB > WARN_SIZE_MB) {
+    if (sizeMB > warnSizeMB) {
       setError(`Large file warning (${sizeMB.toFixed(0)} MB). Upload to local Pi might take longer.`);
     }
     onFileSelect(file);
@@ -47,6 +49,7 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
   function handleDrop(e) {
     e.preventDefault();
     setDragOver(false);
+    if (disabled) return;
     const file = e.dataTransfer.files?.[0];
     validateAndSelect(file);
   }
@@ -58,7 +61,6 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
   if (selectedFile) {
     const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(selectedFile.name);
     const isVideo = /\.(mp4|m4v|webm|mov)$/i.test(selectedFile.name);
-    const previewUrl = URL.createObjectURL(selectedFile);
     const sizeMB = (selectedFile.size / (1024 * 1024)).toFixed(2);
 
     return (
@@ -76,7 +78,7 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
             maxHeight: 280,
           }}
         >
-          {isImage && (
+          {isImage && previewUrl && (
             <img
               src={previewUrl}
               alt="Selected Preview"
@@ -89,7 +91,7 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
               }}
             />
           )}
-          {isVideo && (
+          {isVideo && previewUrl && (
             <video
               src={previewUrl}
               controls
@@ -146,6 +148,7 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
           <button
             type="button"
             className="btn btn-ghost btn-sm"
+            disabled={disabled}
             onClick={() => {
               onFileSelect(null);
               if (inputRef.current) inputRef.current.value = '';
@@ -185,7 +188,7 @@ export default function UploadPanel({ onFileSelect, selectedFile }) {
           Click to browse or drag &amp; drop media here
         </p>
         <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-          Supported: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV (Up to 500 MB)
+          Supported: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV
         </p>
       </div>
 

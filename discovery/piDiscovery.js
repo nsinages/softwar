@@ -552,6 +552,12 @@ export async function findPi(identifier) {
 // HTTP handler — shared by the Vite middleware and the standalone server.
 // `req.url` is relative to the mount point, e.g. "/find?identifier=ns".
 // =============================================
+
+// Each search opens UDP sockets on every interface for a few seconds, so
+// cap concurrent searches to keep the helper from being flooded.
+const MAX_CONCURRENT_FINDS = 4;
+let activeFinds = 0;
+
 export function discoveryRequestHandler(req, res) {
   const url = new URL(req.url || '/', 'http://localhost');
   const send = (code, body) => {
@@ -562,7 +568,7 @@ export function discoveryRequestHandler(req, res) {
   };
 
   if (req.method === 'GET' && url.pathname === '/health') {
-    send(200, { ok: true, service: 'n-signage-discovery', interfaces: lanIPv4Interfaces() });
+    send(200, { ok: true, service: 'n-signage-discovery', interfaces: lanIPv4Interfaces().length });
     return;
   }
 
@@ -577,10 +583,17 @@ export function discoveryRequestHandler(req, res) {
     return;
   }
 
+  if (activeFinds >= MAX_CONCURRENT_FINDS) {
+    send(429, { found: false, identifier, reason: 'helper-busy', error: 'Too many searches in progress. Try again in a few seconds.' });
+    return;
+  }
+
+  activeFinds += 1;
   findPi(identifier)
     .then((result) => send(200, result))
     .catch((err) => {
       console.error(`[PI DISCOVERY ERROR] ${err.stack || err.message}`);
       send(500, { found: false, identifier, reason: 'helper-error', log: [err.message] });
-    });
+    })
+    .finally(() => { activeFinds -= 1; });
 }

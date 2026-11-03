@@ -12,7 +12,6 @@ import {
   X,
   AlertTriangle,
   Loader2,
-  Tv,
 } from 'lucide-react';
 import { getDevices } from '../data/store';
 import { getPiMedia, getPiStatus, deleteMedia } from '../api/piApi';
@@ -47,8 +46,8 @@ export default function Media() {
     setLoading(true);
     setError('');
     const [statusResult, mediaResult] = await Promise.all([
-      getPiStatus(selectedDevice.ip),
-      getPiMedia(selectedDevice.ip),
+      getPiStatus(selectedDevice),
+      getPiMedia(selectedDevice),
     ]);
     setPiStatus(statusResult);
     if (!mediaResult.ok) {
@@ -73,7 +72,7 @@ export default function Media() {
     if (!deleteTarget || !selectedDevice) return;
     setDeleteLoading(true);
     const filename = deleteTarget.filename || deleteTarget.name;
-    const result = await deleteMedia(selectedDevice.ip, filename);
+    const result = await deleteMedia(selectedDevice, filename);
     setDeleteLoading(false);
     if (!result.ok) {
       setError(result.error);
@@ -83,7 +82,7 @@ export default function Media() {
     setDeleteTarget(null);
     setMediaList(ml => ml.filter(m => (m.filename || m.name) !== filename));
     // Refresh status to update media count
-    const statusResult = await getPiStatus(selectedDevice.ip);
+    const statusResult = await getPiStatus(selectedDevice);
     setPiStatus(statusResult);
   }
 
@@ -317,7 +316,7 @@ export default function Media() {
                   <MediaCard
                     key={`${filename}-${idx}`}
                     media={media}
-                    piIp={selectedDevice.ip}
+                    device={selectedDevice}
                     isCurrent={currentMedia === filename}
                     onDelete={m => setDeleteTarget(m)}
                     onPreview={(m, url) => {

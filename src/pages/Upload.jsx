@@ -10,13 +10,9 @@ import {
   RotateCw,
   Search,
   Tv,
-  FileText,
   Film,
-  Image as ImageIcon,
   Check,
-  ArrowRight,
   Loader2,
-  Info,
   HelpCircle,
 } from 'lucide-react';
 import { getDevices } from '../data/store';
@@ -68,7 +64,7 @@ export default function Upload() {
     setPiStatuses(loadingStates);
 
     const promises = list.map(async c => {
-      const res = await getPiStatus(c.ip);
+      const res = await getPiStatus(c);
       return { id: c.id, status: res };
     });
 
@@ -81,13 +77,15 @@ export default function Upload() {
     setCheckingStatuses(false);
   }, []);
 
+  // Check every registered device once when the page opens
   useEffect(() => {
-    if (devicesList.length > 0) {
-      fetchAllStatuses(devicesList);
-    }
+    fetchAllStatuses(getDevices());
   }, [fetchAllStatuses]);
 
+  const isUploading = step === STEP.UPLOADING;
+
   function handleDeviceToggle(deviceId) {
+    if (isUploading) return;
     setSelectedDevices(prev =>
       prev.includes(deviceId)
         ? prev.filter(r => r !== deviceId)
@@ -96,6 +94,7 @@ export default function Upload() {
   }
 
   function handleSelectAllToggle(e) {
+    if (isUploading) return;
     if (e.target.checked) {
       setSelectedDevices(devicesList.map(c => c.id));
     } else {
@@ -107,27 +106,36 @@ export default function Upload() {
   const canUpload = selectedFile && selectedDevices.length > 0 && step !== STEP.UPLOADING;
 
   async function handleUpload() {
-    if (!selectedFile || selectedDevices.length === 0) return;
+    if (!selectedFile || selectedDevices.length === 0 || isUploading) return;
     setStep(STEP.UPLOADING);
 
+    // Snapshot targets and file so later UI changes cannot alter a running deployment
+    const targets = [...selectedDevices];
+    const file = selectedFile;
+    const allDevices = getDevices();
+
     const initial = {};
-    selectedDevices.forEach(id => {
+    targets.forEach(id => {
       initial[id] = { progress: 0, status: 'pending' };
     });
     setUploadStates(initial);
 
-    for (const id of selectedDevices) {
-      const device =
-        devicesList.find(c => c.id === id) ||
-        getDevices().find(c => c.id === id);
-      if (!device) continue;
+    for (const id of targets) {
+      const device = allDevices.find(c => c.id === id);
+      if (!device) {
+        setUploadStates(prev => ({
+          ...prev,
+          [id]: { ...prev[id], status: 'failed', error: 'Device no longer exists' },
+        }));
+        continue;
+      }
 
       setUploadStates(prev => ({
         ...prev,
         [id]: { ...prev[id], status: 'uploading' },
       }));
 
-      const statusRes = await getPiStatus(device.ip);
+      const statusRes = await getPiStatus(device);
       if (!statusRes.ok) {
         setUploadStates(prev => ({
           ...prev,
@@ -140,7 +148,7 @@ export default function Upload() {
         continue;
       }
 
-      const result = await uploadMedia(device.ip, selectedFile, pct => {
+      const result = await uploadMedia(device, file, pct => {
         setUploadStates(prev => ({
           ...prev,
           [id]: { ...prev[id], progress: pct },
@@ -276,7 +284,8 @@ export default function Upload() {
                       <input
                         type="checkbox"
                         style={{ width: 15, height: 15, accentColor: 'var(--accent)' }}
-                        checked={selectedDevices.length === devicesList.length && devicesList.length > 0}
+                        checked={devicesList.length > 0 && devicesList.every(c => selectedDevices.includes(c.id))}
+                        disabled={isUploading}
                         onChange={handleSelectAllToggle}
                       />
                       <span>Select All ({devicesList.length} devices)</span>
@@ -312,6 +321,7 @@ export default function Upload() {
                             type="checkbox"
                             style={{ width: 15, height: 15, accentColor: 'var(--accent)' }}
                             checked={isSelected}
+                            disabled={isUploading}
                             onChange={() => handleDeviceToggle(c.id)}
                           />
                           <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -363,7 +373,7 @@ export default function Upload() {
                 </p>
               </div>
             </div>
-            <UploadPanel selectedFile={selectedFile} onFileSelect={setSelectedFile} />
+            <UploadPanel selectedFile={selectedFile} onFileSelect={setSelectedFile} disabled={isUploading} />
           </div>
 
           {/* Step 3: Sequential Upload Execution */}
@@ -691,7 +701,7 @@ export default function Upload() {
                 </span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                   {['JPG', 'JPEG', 'PNG', 'GIF', 'WEBP'].map(ext => (
-                    <span key={ext} className="badge badge-accent" style={{ fontSize: '11px' }}>
+                    <span key={ext} className="badge badge-info" style={{ fontSize: '11px' }}>
                       {ext}
                     </span>
                   ))}
@@ -704,7 +714,7 @@ export default function Upload() {
                 </span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                   {['MP4', 'M4V', 'WEBM', 'MOV'].map(ext => (
-                    <span key={ext} className="badge badge-warning" style={{ fontSize: '11px' }}>
+                    <span key={ext} className="badge badge-info" style={{ fontSize: '11px' }}>
                       {ext}
                     </span>
                   ))}

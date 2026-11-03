@@ -1,26 +1,44 @@
 // =============================================
 // N Signage V2 — Raspberry Pi API Service
-// Communicates directly with Pi Flask APIs over LAN
+// Communicates with Pi Flask APIs over LAN
 // =============================================
 
 import axios from 'axios';
+import { getSettings } from '../data/store';
 
-const DEFAULT_PORT = 5000;
-const STATUS_TIMEOUT = 5000;  // 5s for status checks
-const UPLOAD_TIMEOUT = 120000; // 2min for uploads
-const DEFAULT_TIMEOUT = 10000; // 10s for other calls
+const STATUS_TIMEOUT = 5000;    // 5s for status checks
+const UPLOAD_TIMEOUT = 600000;  // 10min for uploads (large videos over Wi-Fi)
+const DEFAULT_TIMEOUT = 10000;  // 10s for other calls
 
-/**
- * Build the base URL for a Pi.
- * In development, route through the Vite dev-server proxy to avoid CORS.
- * In production, use the Pi's direct IP (Flask must have CORS enabled there).
- */
-function piUrl(ip, port = DEFAULT_PORT) {
-  if (import.meta.env.DEV) {
-    // Vite proxy: /pi-proxy/<ip>/<port>/... → http://<ip>:<port>/...
-    return `/pi-proxy/${ip}/${port}`;
-  }
-  return `http://${ip}:${port}`;
+// Requests go through the same-origin proxy (/pi-proxy, served by Vite in
+// development and by server/index.js in production). Set VITE_PI_DIRECT=true
+// only when the site is hosted elsewhere and every Pi has CORS enabled.
+const PI_DIRECT = import.meta.env.VITE_PI_DIRECT === 'true';
+
+export const ALLOWED_EXT = /\.(jpg|jpeg|png|gif|webp|mp4|m4v|webm|mov)$/i;
+export const ALLOWED_TYPES = [
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+  'video/mp4', 'video/x-m4v', 'video/webm', 'video/quicktime',
+];
+
+/** Port of a device, falling back to the port configured in Settings. */
+export function devicePort(device) {
+  const port = Number(device?.port);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : getSettings().apiPort;
+}
+
+function piUrl(ip, port) {
+  return PI_DIRECT ? `http://${ip}:${port}` : `/pi-proxy/${ip}/${port}`;
+}
+
+function authHeaders() {
+  const { apiKey } = getSettings();
+  return apiKey ? { 'X-API-Key': apiKey } : {};
+}
+
+/** URL of a media file on a Pi, usable in <img>/<video> src. */
+export function piMediaUrl(device, filename) {
+  return `${piUrl(device.ip, devicePort(device))}/media/${encodeURIComponent(filename)}`;
 }
 
 /**
@@ -39,10 +57,13 @@ function normalizeError(error, context = 'Operation') {
   if (error.response) {
     const status = error.response.status;
     const data = error.response.data;
-    const msg = data?.error || data?.message || data;
-    if (status === 404) return `${context} failed: The upload endpoint (/api/upload) was not found on the Pi (HTTP 404). Ensure the Pi is running the latest N-Signage Flask server.`;
-    if (status === 500) return `${context} failed: Pi server error — ${msg || 'unknown error'}.`;
+    const msg = typeof data === 'string' ? data.slice(0, 200) : data?.error || data?.message;
+    if (status === 401) return `${context} failed: The Pi rejected the API key. Set the correct key in Settings.`;
+    if (status === 403) return `${context} failed: ${msg || 'Access denied'}.`;
+    if (status === 404) return `${context} failed: Not found on the Pi (HTTP 404). Ensure the Pi is running the latest N-Signage server.`;
     if (status === 413) return `${context} failed: File too large for the Pi to accept.`;
+    if (status === 502) return `${context} failed: The Raspberry Pi is unreachable.`;
+    if (status >= 500) return `${context} failed: Pi server error — ${msg || 'unknown error'}.`;
     return `${context} failed (HTTP ${status}): ${msg || 'Unknown server error'}.`;
   }
   return `${context} failed: ${error.message || 'Unknown error'}`;
@@ -53,14 +74,13 @@ function normalizeError(error, context = 'Operation') {
 // =============================================
 /**
  * Get the current status of a Raspberry Pi.
- * @param {string} ip - Pi LAN IP address
- * @param {number} [port] - Flask API port (default 5000)
+ * @param {{ip: string, port?: number}} device
  * @returns {Promise<{ok: boolean, data?: object, error?: string, latency?: number}>}
  */
-export async function getPiStatus(ip, port = DEFAULT_PORT) {
+export async function getPiStatus(device) {
   const start = Date.now();
   try {
-    const res = await axios.get(`${piUrl(ip, port)}/api/status`, {
+    const res = await axios.get(`${piUrl(device.ip, devicePort(device))}/api/status`, {
       timeout: STATUS_TIMEOUT,
     });
     return {
@@ -82,13 +102,12 @@ export async function getPiStatus(ip, port = DEFAULT_PORT) {
 // =============================================
 /**
  * Get the list of media files on a Raspberry Pi.
- * @param {string} ip - Pi LAN IP address
- * @param {number} [port]
+ * @param {{ip: string, port?: number}} device
  * @returns {Promise<{ok: boolean, data?: Array, error?: string}>}
  */
-export async function getPiMedia(ip, port = DEFAULT_PORT) {
+export async function getPiMedia(device) {
   try {
-    const res = await axios.get(`${piUrl(ip, port)}/api/media`, {
+    const res = await axios.get(`${piUrl(device.ip, devicePort(device))}/api/media`, {
       timeout: DEFAULT_TIMEOUT,
     });
     // Accept array or { media: [...] } shaped responses
@@ -96,7 +115,9 @@ export async function getPiMedia(ip, port = DEFAULT_PORT) {
       ? res.data
       : res.data?.media || res.data?.files || [];
     // Older Pi servers return plain filename strings — normalize to objects
-    const mediaList = rawList.map((m) => (typeof m === 'string' ? { name: m } : m));
+    const mediaList = rawList
+      .map((m) => (typeof m === 'string' ? { name: m } : m))
+      .filter((m) => m && typeof (m.filename || m.name) === 'string');
     return { ok: true, data: mediaList };
   } catch (error) {
     return { ok: false, error: normalizeError(error, 'Fetch media') };
@@ -108,20 +129,12 @@ export async function getPiMedia(ip, port = DEFAULT_PORT) {
 // =============================================
 /**
  * Upload a media file to a Raspberry Pi.
- * @param {string} ip - Pi LAN IP address
+ * @param {{ip: string, port?: number}} device
  * @param {File} file - File object from input
  * @param {function} [onProgress] - Progress callback (0–100)
- * @param {number} [port]
  * @returns {Promise<{ok: boolean, data?: object, error?: string}>}
  */
-export async function uploadMedia(ip, file, onProgress = null, port = DEFAULT_PORT) {
-  // Validate file type
-  const ALLOWED_TYPES = [
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-    'video/mp4', 'video/x-m4v', 'video/webm', 'video/quicktime',
-  ];
-  const ALLOWED_EXT = /\.(jpg|jpeg|png|gif|webp|mp4|m4v|webm|mov)$/i;
-
+export async function uploadMedia(device, file, onProgress = null) {
   if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXT.test(file.name)) {
     return {
       ok: false,
@@ -132,13 +145,10 @@ export async function uploadMedia(ip, file, onProgress = null, port = DEFAULT_PO
   const formData = new FormData();
   formData.append('file', file);
 
-  const uploadUrl = `${piUrl(ip, port)}/api/upload`;
-
   try {
-    console.log(`[piApi] Uploading to: ${uploadUrl} (file: ${file.name}, size: ${file.size})`);
-    const res = await axios.post(uploadUrl, formData, {
+    const res = await axios.post(`${piUrl(device.ip, devicePort(device))}/api/upload`, formData, {
       timeout: UPLOAD_TIMEOUT,
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers: authHeaders(),
       onUploadProgress: (progressEvent) => {
         if (onProgress && progressEvent.total) {
           const pct = Math.round((progressEvent.loaded * 100) / progressEvent.total);
@@ -146,16 +156,8 @@ export async function uploadMedia(ip, file, onProgress = null, port = DEFAULT_PO
         }
       },
     });
-    console.log(`[piApi] Upload success:`, res.data);
     return { ok: true, data: res.data };
   } catch (error) {
-    console.error(`[piApi] Upload failed:`, {
-      url: uploadUrl,
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message,
-      code: error.code,
-    });
     return { ok: false, error: normalizeError(error, 'Upload') };
   }
 }
@@ -165,18 +167,17 @@ export async function uploadMedia(ip, file, onProgress = null, port = DEFAULT_PO
 // =============================================
 /**
  * Delete a media file from a Raspberry Pi.
- * @param {string} ip - Pi LAN IP address
+ * @param {{ip: string, port?: number}} device
  * @param {string} filename - Filename to delete
- * @param {number} [port]
  * @returns {Promise<{ok: boolean, data?: object, error?: string}>}
  */
-export async function deleteMedia(ip, filename, port = DEFAULT_PORT) {
+export async function deleteMedia(device, filename) {
   if (!filename) return { ok: false, error: 'No filename provided.' };
-  const encoded = encodeURIComponent(filename);
   try {
-    const res = await axios.delete(`${piUrl(ip, port)}/api/media/${encoded}`, {
-      timeout: DEFAULT_TIMEOUT,
-    });
+    const res = await axios.delete(
+      `${piUrl(device.ip, devicePort(device))}/api/media/${encodeURIComponent(filename)}`,
+      { timeout: DEFAULT_TIMEOUT, headers: authHeaders() }
+    );
     return { ok: true, data: res.data };
   } catch (error) {
     return { ok: false, error: normalizeError(error, 'Delete') };
@@ -188,18 +189,16 @@ export async function deleteMedia(ip, filename, port = DEFAULT_PORT) {
 // =============================================
 /**
  * Check the status of multiple Pis in parallel.
- * @param {Array<{id, ip}>} devices
+ * @param {Array<{id, ip, port?}>} devices
  * @returns {Promise<Object>} map of id -> status result
  */
 export async function checkAllDevices(devices) {
-  const results = await Promise.allSettled(
-    devices.map((d) => getPiStatus(d.ip).then((r) => ({ id: d.id, ...r })))
+  const results = await Promise.all(
+    devices.map((d) => getPiStatus(d).then((r) => ({ id: d.id, ...r })))
   );
   const map = {};
   results.forEach((r) => {
-    if (r.status === 'fulfilled') {
-      map[r.value.id] = r.value;
-    }
+    map[r.id] = r;
   });
   return map;
 }

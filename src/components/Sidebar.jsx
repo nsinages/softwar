@@ -11,9 +11,10 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
-  Tv,
   X,
 } from 'lucide-react';
+import logo from '../assets/logo.png';
+import logoIcon from '../assets/logo-icon.png';
 
 const MAIN_NAV = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -41,14 +42,9 @@ export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose
       >
         {/* Brand Header */}
         <div className="sidebar-brand">
-          <div className="brand-logo-icon">
-            <Tv size={18} strokeWidth={2.2} />
-          </div>
-
-          <div className="brand-text">
-            <div className="brand-title">N-SIGNAGE</div>
-            <div className="brand-subtitle">Fleet Manager</div>
-          </div>
+          {/* Full logo when expanded, square logo when collapsed */}
+          <img src={logo} alt="N-Sinages — Digital Sinage Solution" className="brand-logo-img" />
+          <img src={logoIcon} alt="N-Sinages" className="brand-logo-icon" />
 
           {/* Close button visible only on mobile drawer */}
           <button

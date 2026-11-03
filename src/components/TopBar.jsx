@@ -3,7 +3,7 @@
 // =============================================
 import React from 'react';
 import { useLocation } from 'react-router-dom';
-import { Sun, Moon, User, Menu } from 'lucide-react';
+import { User, Menu } from 'lucide-react';
 
 const PAGE_TITLES = {
   '/': { title: 'Dashboard', subtitle: 'Overview of all digital signage devices' },
@@ -16,8 +16,6 @@ const PAGE_TITLES = {
 export default function TopBar({
   onlineCount = 0,
   totalCount = 0,
-  onThemeToggle,
-  theme,
   onMobileMenuToggle,
 }) {
   const location = useLocation();
@@ -47,7 +45,7 @@ export default function TopBar({
         </div>
       </div>
 
-      {/* Right: Fleet Health & Theme & Profile */}
+      {/* Right: Fleet Health & Profile */}
       <div className="topbar-right">
         {/* Live Network Status Chip */}
         <div
@@ -68,16 +66,6 @@ export default function TopBar({
             <span className="network-pill-total">/{totalCount}</span> Online
           </span>
         </div>
-
-        {/* Theme Toggle Button */}
-        <button
-          onClick={onThemeToggle}
-          className="btn btn-secondary btn-icon theme-toggle-btn"
-          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-          aria-label="Toggle color theme"
-        >
-          {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
-        </button>
 
         {/* User Badge */}
         <div className="topbar-user-badge">

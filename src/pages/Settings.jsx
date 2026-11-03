@@ -3,25 +3,21 @@
 // =============================================
 import React, { useState } from 'react';
 import {
-  Settings as SettingsIcon,
   Globe,
   UploadCloud,
-  Palette,
   Info,
-  RotateCw,
+  Trash2,
   Check,
-  Sun,
-  Moon,
   AlertTriangle,
-  Server,
-  Shield,
+  KeyRound,
 } from 'lucide-react';
-import { getSettings, saveSettings, resetDevicesToDefault } from '../data/store';
+import { getSettings, saveSettings, clearAllDevices, SETTINGS_LIMITS } from '../data/store';
 
 export default function Settings() {
   const [settings, setSettings] = useState(() => getSettings());
   const [saved, setSaved] = useState(false);
   const [resetSaved, setResetSaved] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   function handleChange(key, value) {
     setSettings(s => ({ ...s, [key]: value }));
@@ -29,18 +25,23 @@ export default function Settings() {
   }
 
   function handleSave() {
-    saveSettings(settings);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
+    try {
+      setSettings(saveSettings(settings));
+      setSaveError('');
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (err) {
+      setSaveError(err.message);
+    }
   }
 
   function handleResetData() {
     if (
       window.confirm(
-        'Are you sure you want to reset all devices to default seed data? This will overwrite your current configuration.'
+        'Remove ALL devices from this dashboard? Files on the Raspberry Pis are not affected. This cannot be undone.'
       )
     ) {
-      resetDevicesToDefault();
+      clearAllDevices();
       setResetSaved(true);
       setTimeout(() => {
         setResetSaved(false);
@@ -75,12 +76,12 @@ export default function Settings() {
                 type="number"
                 className="form-input"
                 value={settings.pollInterval}
-                min={5}
-                max={300}
-                onChange={e => handleChange('pollInterval', parseInt(e.target.value) || 30)}
+                min={SETTINGS_LIMITS.pollInterval.min}
+                max={SETTINGS_LIMITS.pollInterval.max}
+                onChange={e => handleChange('pollInterval', e.target.value)}
               />
               <span className="form-hint">
-                How often the dashboard checks each Raspberry Pi's online status (Recommended: 30s)
+                How often the dashboard checks each Raspberry Pi's online status, 5–300 s (Recommended: 30s). Applies after reload.
               </span>
             </div>
 
@@ -91,9 +92,9 @@ export default function Settings() {
                 className="form-input"
                 style={{ fontFamily: 'var(--font-mono)' }}
                 value={settings.apiPort}
-                min={1}
-                max={65535}
-                onChange={e => handleChange('apiPort', parseInt(e.target.value) || 5000)}
+                min={SETTINGS_LIMITS.apiPort.min}
+                max={SETTINGS_LIMITS.apiPort.max}
+                onChange={e => handleChange('apiPort', e.target.value)}
               />
               <span className="form-hint">
                 Default REST API service port running on digital signage units (Default: 5000)
@@ -116,9 +117,9 @@ export default function Settings() {
               type="number"
               className="form-input"
               value={settings.uploadSizeWarning}
-              min={10}
-              max={5000}
-              onChange={e => handleChange('uploadSizeWarning', parseInt(e.target.value) || 500)}
+              min={SETTINGS_LIMITS.uploadSizeWarning.min}
+              max={SETTINGS_LIMITS.uploadSizeWarning.max}
+              onChange={e => handleChange('uploadSizeWarning', e.target.value)}
             />
             <span className="form-hint">
               Warn user prior to transferring files exceeding this size limit
@@ -126,36 +127,29 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* Appearance */}
+        {/* Security */}
         <div className="card">
           <div className="card-header">
             <div className="card-title">
-              <Palette size={18} style={{ color: 'var(--accent)' }} />
-              <span>Theme &amp; Appearance</span>
+              <KeyRound size={18} style={{ color: 'var(--accent)' }} />
+              <span>Security</span>
             </div>
           </div>
           <div className="form-group">
-            <label className="form-label">Interface Theme</label>
-            <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
-              {[
-                { id: 'light', label: 'Light Mode', icon: Sun },
-                { id: 'dark', label: 'Dark Mode', icon: Moon },
-              ].map(({ id, label, icon: Icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={`btn ${settings.theme === id ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => {
-                    handleChange('theme', id);
-                    document.documentElement.setAttribute('data-theme', id);
-                  }}
-                  style={{ flex: 1 }}
-                >
-                  <Icon size={15} />
-                  <span>{label}</span>
-                </button>
-              ))}
-            </div>
+            <label className="form-label">Pi API Key</label>
+            <input
+              type="password"
+              className="form-input"
+              style={{ fontFamily: 'var(--font-mono)' }}
+              value={settings.apiKey}
+              autoComplete="off"
+              maxLength={256}
+              placeholder="Leave empty if the Pis have no key configured"
+              onChange={e => handleChange('apiKey', e.target.value)}
+            />
+            <span className="form-hint">
+              Must match NSIGNAGE_API_KEY on each Raspberry Pi. Required to upload or delete media when a key is set on the Pi. Stored only in this browser.
+            </span>
           </div>
         </div>
 
@@ -200,12 +194,12 @@ export default function Settings() {
           <div className="card-header">
             <div className="card-title" style={{ color: 'var(--danger)' }}>
               <AlertTriangle size={18} />
-              <span>Reset Configuration</span>
+              <span>Remove All Devices</span>
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-              Reset stored device data back to initial seed default state. Use this if you need a fresh start or want to re-initialize classroom displays.
+              Remove every registered device from this dashboard (stored in this browser). The Raspberry Pis and their media files are not affected.
             </p>
             <div>
               <button
@@ -213,12 +207,12 @@ export default function Settings() {
                 className="btn btn-danger btn-sm"
                 onClick={handleResetData}
               >
-                <RotateCw size={13} /> Reset Device Store
+                <Trash2 size={13} /> Remove All Devices
               </button>
             </div>
             {resetSaved && (
               <span className="badge badge-success" style={{ alignSelf: 'flex-start' }}>
-                <Check size={12} /> Database reset successfully. Reloading…
+                <Check size={12} /> All devices removed. Reloading…
               </span>
             )}
           </div>
@@ -229,6 +223,11 @@ export default function Settings() {
           <button type="button" className="btn btn-primary btn-lg" onClick={handleSave}>
             <Check size={16} /> Save Settings
           </button>
+          {saveError && (
+            <span className="badge badge-danger" style={{ padding: '6px 12px', fontSize: 'var(--text-xs)' }}>
+              {saveError}
+            </span>
+          )}
           {saved && (
             <span className="badge badge-success" style={{ padding: '6px 12px', fontSize: 'var(--text-xs)' }}>
               <Check size={13} /> Settings Saved

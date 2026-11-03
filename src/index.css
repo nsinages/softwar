@@ -132,13 +132,31 @@ input, select, textarea {
   width: 34px;
   height: 34px;
   border-radius: var(--radius-md);
-  background: var(--accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #ffffff;
+  object-fit: cover;
   flex-shrink: 0;
   box-shadow: 0 2px 4px rgba(244, 119, 33, 0.25);
+}
+
+/* Cropped brand logo — shown when the sidebar is expanded */
+.brand-logo-img {
+  display: block;
+  height: 44px;
+  width: auto;
+  border-radius: var(--radius-md);
+  box-shadow: 0 2px 4px rgba(244, 119, 33, 0.25);
+  flex-shrink: 0;
+}
+
+.sidebar .brand-logo-icon {
+  display: none;
+}
+
+.sidebar.collapsed .brand-logo-img {
+  display: none;
+}
+
+.sidebar.collapsed .brand-logo-icon {
+  display: block;
 }
 
 .brand-text {
@@ -338,10 +356,6 @@ input, select, textarea {
   color: var(--text-secondary);
 }
 
-.theme-toggle-btn {
-  border-radius: var(--radius-full);
-  padding: 8px;
-}
 
 .topbar-user-badge {
   display: flex;
