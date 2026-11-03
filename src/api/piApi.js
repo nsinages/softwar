@@ -5,6 +5,9 @@
 
 import axios from 'axios';
 import { getSettings } from '../data/store';
+import {
+  isCloudDevice, cloudStatus, cloudMedia, cloudUpload, cloudDelete,
+} from './cloudApi';
 
 const STATUS_TIMEOUT = 5000;    // 5s for status checks
 const UPLOAD_TIMEOUT = 600000;  // 10min for uploads (large videos over Wi-Fi)
@@ -36,8 +39,13 @@ function authHeaders() {
   return apiKey ? { 'X-API-Key': apiKey } : {};
 }
 
-/** URL of a media file on a Pi, usable in <img>/<video> src. */
-export function piMediaUrl(device, filename) {
+/**
+ * URL of a media file on a Pi, usable in <img>/<video> src.
+ * Cloud devices: the cloud copy of the file, or null when there is none
+ * (a hosted website cannot load files straight from the Pi).
+ */
+export function piMediaUrl(device, filename, media = null) {
+  if (isCloudDevice(device)) return media?.url || null;
   return `${piUrl(device.ip, devicePort(device))}/media/${encodeURIComponent(filename)}`;
 }
 
@@ -78,6 +86,7 @@ function normalizeError(error, context = 'Operation') {
  * @returns {Promise<{ok: boolean, data?: object, error?: string, latency?: number}>}
  */
 export async function getPiStatus(device) {
+  if (isCloudDevice(device)) return cloudStatus(device);
   const start = Date.now();
   try {
     const res = await axios.get(`${piUrl(device.ip, devicePort(device))}/api/status`, {
@@ -106,6 +115,7 @@ export async function getPiStatus(device) {
  * @returns {Promise<{ok: boolean, data?: Array, error?: string}>}
  */
 export async function getPiMedia(device) {
+  if (isCloudDevice(device)) return cloudMedia(device);
   try {
     const res = await axios.get(`${piUrl(device.ip, devicePort(device))}/api/media`, {
       timeout: DEFAULT_TIMEOUT,
@@ -142,6 +152,8 @@ export async function uploadMedia(device, file, onProgress = null) {
     };
   }
 
+  if (isCloudDevice(device)) return cloudUpload(device, file, onProgress);
+
   const formData = new FormData();
   formData.append('file', file);
 
@@ -173,6 +185,7 @@ export async function uploadMedia(device, file, onProgress = null) {
  */
 export async function deleteMedia(device, filename) {
   if (!filename) return { ok: false, error: 'No filename provided.' };
+  if (isCloudDevice(device)) return cloudDelete(device, filename);
   try {
     const res = await axios.delete(
       `${piUrl(device.ip, devicePort(device))}/api/media/${encodeURIComponent(filename)}`,

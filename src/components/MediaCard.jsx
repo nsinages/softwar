@@ -44,7 +44,7 @@ function formatDate(dateStr) {
 export default function MediaCard({ media, device, isCurrent, onDelete, onPreview }) {
   const mediaType = getMediaType(media.filename || media.name);
   const filename = media.filename || media.name || 'unknown';
-  const previewUrl = device ? piMediaUrl(device, filename) : null;
+  const previewUrl = device ? piMediaUrl(device, filename, media) : null;
 
   return (
     <div

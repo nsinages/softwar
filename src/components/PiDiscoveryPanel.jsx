@@ -239,6 +239,13 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
             <span>Raspberry Pi not found.</span>
           </div>
 
+          {result?.reason === 'other-network' && (
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+              A Raspberry Pi with the username <strong>{trimmed}</strong> is connected to the cloud, but from a
+              different network. Connect this computer or phone to the same Wi-Fi as the Pi, then try again.
+            </div>
+          )}
+
           {result?.reason === 'username-mismatch' && (
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
               {result.otherCount} N-Signage Raspberry Pi{result.otherCount === 1 ? '' : 's'} answered on this network,
@@ -253,7 +260,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
             <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 3 }}>
               <li>Both devices are connected to the same Wi-Fi network.</li>
               <li>The Raspberry Pi is powered on.</li>
-              <li>The N-Signage discovery service is running on the Pi.</li>
+              <li>The N-Signage cloud and discovery services are running on the Pi, and it has internet access.</li>
               <li>The username is the Pi's Linux username (e.g. <code>ns</code>).</li>
             </ul>
           </div>

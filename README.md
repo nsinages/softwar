@@ -19,6 +19,47 @@ The dashboard server **must run on a machine on the same network as the Pis**
 (browsers cannot reach LAN devices across origins or do discovery themselves).
 Device list and settings are stored in each browser's `localStorage`.
 
+## Hosted website (cloud relay) — software.nsinages.in
+
+A website hosted on the internet (Vercel) can never connect to a Pi on a
+customer's Wi-Fi. When the site is opened from a public domain it switches to
+**cloud mode** automatically: every Pi connects *out* to the website, and the
+website relays everything through the cloud.
+
+```
+Pi (cloud_agent.py) ──every 5 s──►  POST /api/pi/sync   ◄── queued commands (download / delete)
+Browser ──► /api/find   (Pis with this username on the SAME public IP / Wi-Fi as the browser)
+        ──► /api/pair   (pairs this browser with the Pi → control token in localStorage)
+        ──► /api/device (status, media list, delete; uploads go to Vercel Blob, the Pi downloads them)
+```
+
+A Pi can only be **added** from a device on the same Wi-Fi as the Pi. After
+that, it can be managed from anywhere.
+
+### One-time Vercel setup
+
+In the Vercel project → **Storage**:
+
+1. **Create / connect an Upstash Redis** database (Marketplace → Upstash → Redis).
+   This adds `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
+2. **Create / connect a Blob store** with **public** access.
+   This adds `BLOB_READ_WRITE_TOKEN`.
+3. Redeploy.
+
+### On every Raspberry Pi
+
+```bash
+sudo cp n-signage-cloud.service /etc/systemd/system/
+# edit User= and the paths if the Pi user is not "nsignage"
+sudo systemctl daemon-reload
+sudo systemctl enable --now n-signage-cloud.service
+journalctl -u n-signage-cloud -f      # expect "Connected to the cloud"
+```
+
+`NSIGNAGE_CLOUD_URL` in `/etc/n-signage.env` changes the website address
+(default `https://software.nsinages.in`). Mode is detected from the page's
+host name; force it with `VITE_CONNECTION_MODE=cloud|lan` at build time.
+
 ## Requirements
 
 - Node.js 20.19+ (dashboard server)

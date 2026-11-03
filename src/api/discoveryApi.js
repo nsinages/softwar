@@ -6,6 +6,7 @@
 // =============================================
 
 import axios from 'axios';
+import { isCloudMode, cloudFindPi } from './cloudApi';
 
 // Same-origin when served by Vite dev/preview; override for static builds
 // e.g. VITE_DISCOVERY_URL=http://192.168.1.10:5055/discovery-api
@@ -42,7 +43,10 @@ export function isDiscoveryDebug() {
 export async function findPi(identifier) {
   const url = `${DISCOVERY_BASE}/find?identifier=${encodeURIComponent(identifier)}`;
   let result;
-  try {
+  // Hosted website: ask the cloud relay (Pis report to it themselves)
+  if (isCloudMode() && !import.meta.env.VITE_DISCOVERY_URL) {
+    result = await cloudFindPi(identifier);
+  } else try {
     const res = await axios.get(url, { timeout: DISCOVERY_TIMEOUT });
     result = { log: [], devices: [], ...res.data };
   } catch (error) {

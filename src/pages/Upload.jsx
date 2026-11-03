@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { getDevices } from '../data/store';
 import { getPiStatus, uploadMedia } from '../api/piApi';
+import { isCloudDevice } from '../api/cloudApi';
 import UploadPanel from '../components/UploadPanel';
 import StatusBadge from '../components/StatusBadge';
 
@@ -135,8 +136,10 @@ export default function Upload() {
         [id]: { ...prev[id], status: 'uploading' },
       }));
 
+      // Cloud devices may be offline: the upload is queued and the Pi
+      // downloads it when it reconnects.
       const statusRes = await getPiStatus(device);
-      if (!statusRes.ok) {
+      if (!statusRes.ok && !isCloudDevice(device)) {
         setUploadStates(prev => ({
           ...prev,
           [id]: {

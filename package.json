@@ -12,6 +12,8 @@
     "discovery": "node discovery/server.js"
   },
   "dependencies": {
+    "@upstash/redis": "^1.41.0",
+    "@vercel/blob": "^2.8.2",
     "axios": "^1.21.0",
     "lucide-react": "^1.52.0",
     "react-router-dom": "^7.18.2"

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { getDevices, saveDevice, updateDevice, deleteDevice } from '../data/store';
 import { getPiStatus } from '../api/piApi';
+import { isCloudMode, cloudPair } from '../api/cloudApi';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import PiDiscoveryPanel from '../components/PiDiscoveryPanel';
@@ -143,6 +144,41 @@ export default function Devices() {
 
     setSubmitting(true);
     setFormError('');
+
+    // Hosted website: the Pi cannot be reached directly, so pair with the Pi
+    // that Find Pi located through the cloud relay.
+    if (isCloudMode()) {
+      if (!discovered?.deviceId || !sameUser(discovered.username, username)) {
+        setSubmitting(false);
+        setFormError('Click "Find Pi" first. On the website, a Raspberry Pi can only be added after it has been found.');
+        return;
+      }
+      if (current.some(d => d.piDeviceId === discovered.deviceId)) {
+        setSubmitting(false);
+        setFormError('This Raspberry Pi is already registered.');
+        return;
+      }
+      const pair = await cloudPair(discovered.deviceId, username);
+      if (session !== formSession.current) return;
+      if (!pair.ok) {
+        setSubmitting(false);
+        setFormError(pair.error);
+        return;
+      }
+      const saved = saveDevice({
+        deviceId: pair.device.username,
+        nickName: form.nickName.trim(),
+        ip: pair.device.ip || ip,
+        ...(pair.device.hostname && { hostname: pair.device.hostname }),
+        piDeviceId: pair.device.deviceId,
+        cloudToken: pair.token,
+      });
+      reload();
+      closeForm();
+      setSuccessMsg(`${saved.nickName || saved.deviceId} was added successfully. You can now manage it from anywhere.`);
+      return;
+    }
+
     const status = await getPiStatus({ ip });
     if (session !== formSession.current) return; // form was closed meanwhile
 
