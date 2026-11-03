@@ -164,7 +164,7 @@ export default function Settings() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
             {[
               ['Platform', 'N-Signage Digital Signage System'],
-              ['Version', '2.4.0 (V3 Discovery Enabled)'],
+              ['Version', '4.5.0 (V3 Discovery Enabled)'],
               ['Architecture', 'Decentralized Edge Nodes + Central Management Console'],
               ['Communication Protocol', 'Direct REST API over LAN / Wi-Fi'],
               ['Device Storage', 'Client-side LocalStorage + Raspberry Pi FS'],
