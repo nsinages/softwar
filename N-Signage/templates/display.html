@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>N Signage Display</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/display.css') }}">
+</head>
+<body>
+  <div id="signageContainer" class="signage-container">
+    <!-- Video Player Element -->
+    <video id="videoPlayer" class="media-element" autoplay muted playsinline></video>
+
+    <!-- Image Player Element -->
+    <img id="imagePlayer" class="media-element" alt="Signage Image">
+
+    <!-- Fallback display when no media is present -->
+    <div id="noMediaFallback" class="fallback-screen" style="display: none;">
+      <h1 class="brand-title">N SIGNAGE</h1>
+      <p class="fallback-subtitle">No media available</p>
+    </div>
+
+    <!-- Shown when the Pi's own API stops responding to polling -->
+    <div id="offlineFallback" class="fallback-screen" style="display: none;">
+      <div class="fallback-spinner"></div>
+      <h1 class="brand-title">N SIGNAGE</h1>
+      <p class="fallback-subtitle">Waiting for N Signage device...</p>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/display.js') }}"></script>
+</body>
+</html>

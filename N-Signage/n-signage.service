@@ -1,0 +1,22 @@
+[Unit]
+Description=N Signage Flask Server
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nsignage
+WorkingDirectory=/home/nsignage/n-signage
+ExecStart=/usr/bin/python3 /home/nsignage/n-signage/app/app.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# Optional secrets/config, e.g. NSIGNAGE_API_KEY=<long random string>
+# (create with: sudo install -m 600 /dev/null /etc/n-signage.env)
+EnvironmentFile=-/etc/n-signage.env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

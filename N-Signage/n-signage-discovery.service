@@ -1,0 +1,21 @@
+[Unit]
+Description=N Signage LAN Discovery Responder (UDP 50500)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Must be the same Linux user as n-signage.service: this is the username
+# the website verifies when adding the device.
+User=nsignage
+WorkingDirectory=/home/nsignage/n-signage
+ExecStart=/usr/bin/python3 /home/nsignage/n-signage/app/discovery_responder.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

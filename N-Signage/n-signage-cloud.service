@@ -1,0 +1,23 @@
+[Unit]
+Description=N Signage Cloud Agent (connects this Pi to the hosted website)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Must be the same Linux user as n-signage.service: this is the username
+# customers type into "Find Pi" on the website.
+User=nsignage
+WorkingDirectory=/home/nsignage/n-signage
+ExecStart=/usr/bin/python3 /home/nsignage/n-signage/app/cloud_agent.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+# Optional: NSIGNAGE_CLOUD_URL=https://software.nsinages.in
+EnvironmentFile=-/etc/n-signage.env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
