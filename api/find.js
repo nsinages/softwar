@@ -4,25 +4,24 @@
 // with the cloud in the last 2 minutes from the SAME public network as this
 // browser (same Wi-Fi → same router → same public IP / IPv6 /64).
 //
-// - Login required (no anonymous network scanning).
+// - Needs the browser session cookie (created automatically by /api/auth).
 // - The username is optional; when given it only filters the results.
-// - Pis owned by another account are shown without any private details.
-// - Each Pi that can be added gets a single-use, 3-minute claim nonce that is
-//   bound to this account and this network. POST /api/devices needs it, so a
-//   Pi can only be added right after it was found from its own network.
+// - Each Pi not yet added in this browser gets a single-use, 3-minute claim
+//   nonce bound to this browser and this network. POST /api/devices needs it,
+//   so a Pi can only be added right after it was found from its own network.
 import {
   redis, keys, clientIp, networkKey, send, handleError, httpError, rateLimit,
   USERNAME_RX, NEARBY_WINDOW_MS, publicView, randomToken,
 } from './_lib/cloud.js';
-import { requireAccount } from './_lib/auth.js';
+import { requireBrowser } from './_lib/auth.js';
 
 const NONCE_TTL_S = 180;
 
 export default async function handler(req, res) {
   try {
     if (req.method !== 'GET') throw httpError(405, 'Method not allowed');
-    const account = await requireAccount(req);
-    await rateLimit('find', account.id, 40, 60);
+    const browser = await requireBrowser(req);
+    await rateLimit('find', browser.id, 40, 60);
 
     const identifier = String(req.query?.identifier || '').trim();
     if (identifier && !USERNAME_RX.test(identifier)) {
@@ -39,44 +38,37 @@ export default async function handler(req, res) {
     const now = Date.now();
     const ids = (await r.zrange(keys.net(net), now - NEARBY_WINDOW_MS, '+inf', { byScore: true })) || [];
     const unique = [...new Set(ids)].slice(0, 50);
-    const [records, owners] = unique.length
-      ? await Promise.all([r.mget(...unique.map(keys.device)), r.mget(...unique.map(keys.owner))])
-      : [[], []];
+    const records = unique.length ? await r.mget(...unique.map(keys.device)) : [];
+    const added = await Promise.all(unique.map((id) => r.sismember(keys.owners(id), browser.id)));
 
     const devices = [];
     for (let i = 0; i < unique.length; i += 1) {
       const d = records[i];
       if (!d) continue;
       if (identifier && d.username.toLowerCase() !== identifier.toLowerCase()) continue;
-      const owner = owners[i];
-      if (owner && owner !== account.id) {
-        // Someone else's Pi: say it exists (helps support), reveal nothing private.
-        devices.push({ deviceId: d.deviceId, hostname: d.hostname || null, online: publicView(d, now).online, ownership: 'other' });
-        continue;
-      }
-      const view = { ...publicView(d, now), ownership: owner === account.id ? 'mine' : 'available' };
+      const view = { ...publicView(d, now), ownership: added[i] ? 'mine' : 'available' };
       if (view.ownership === 'available') {
         const nonce = randomToken();
-        await r.set(keys.nonce(nonce), { accountId: account.id, deviceId: d.deviceId, net }, { ex: NONCE_TTL_S });
+        await r.set(keys.nonce(nonce), { browserId: browser.id, deviceId: d.deviceId, net }, { ex: NONCE_TTL_S });
         view.claimNonce = nonce;
         view.claimExpiresAt = now + NONCE_TTL_S * 1000;
       }
       devices.push(view);
     }
 
-    const rank = { available: 0, mine: 1, other: 2 };
+    const rank = { available: 0, mine: 1 };
     devices.sort((a, b) => (rank[a.ownership] - rank[b.ownership]) || (b.online - a.online) || ((b.lastSeen || 0) - (a.lastSeen || 0)));
 
     console.log('[N-SIGNAGE CLOUD] find', JSON.stringify({
-      account: account.id, filtered: Boolean(identifier), nearby: unique.length, returned: devices.length,
+      browser: browser.id, filtered: Boolean(identifier), nearby: unique.length, returned: devices.length,
     }));
 
-    const found = devices.some((d) => d.ownership !== 'other');
-    const single = devices.length === 1 && devices[0].ownership !== 'other' ? devices[0] : null;
+    const found = devices.length > 0;
+    const single = devices.length === 1 ? devices[0] : null;
     send(res, 200, {
       found,
       identifier: identifier || null,
-      reason: found ? undefined : devices.length ? 'only-other-accounts' : 'not-found',
+      reason: found ? undefined : 'not-found',
       multiple: devices.length > 1,
       devices,
       ...(single || {}),

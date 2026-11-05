@@ -61,7 +61,7 @@ export default function Devices() {
   const cloud = isCloudMode();
   const reload = () => setDevices(getDevices());
 
-  // Cloud mode: the list is the logged-in account's devices (shared across browsers)
+  // Cloud mode: the list is the Pis added in this browser (kept in the cloud)
   useEffect(() => {
     const onChange = () => setDevices(getDevices());
     window.addEventListener(DEVICES_CHANGED_EVENT, onChange);
@@ -621,7 +621,7 @@ export default function Devices() {
                 onAdded={saved => {
                   reload();
                   closeForm();
-                  setSuccessMsg(`${saved.nickName || saved.hostname || saved.deviceId} was added to your account. It stays registered when you log in from any phone or computer.`);
+                  setSuccessMsg(`${saved.nickName || saved.hostname || saved.deviceId} was added. It stays on this list in this browser and can be managed from any network.`);
                 }}
               />
             ) : cloud ? (
@@ -752,7 +752,7 @@ export default function Devices() {
             Are you sure you want to remove <strong>{deleteTarget?.deviceId}</strong>?
             <br /><br />
             {cloud
-              ? 'This removes the display from your account on every phone and computer. Media already on the Raspberry Pi stays there and keeps playing. You can add it again later with Find Pi.'
+              ? 'This removes the display from this browser. Media already on the Raspberry Pi stays there and keeps playing. You can add it again later with Find Pi.'
               : 'This will remove the display from this management dashboard. The physical Raspberry Pi and its stored files will remain unaffected.'}
           </span>
         }

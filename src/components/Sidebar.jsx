@@ -12,7 +12,6 @@ import {
   ChevronLeft,
   ChevronRight,
   X,
-  LogOut,
 } from 'lucide-react';
 import logo from '../assets/logo.png';
 import logoIcon from '../assets/logo-icon.png';
@@ -28,7 +27,7 @@ const BOTTOM_NAV = [
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 
-export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose, account, onLogout }) {
+export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose }) {
   return (
     <>
       {/* Mobile backdrop */}
@@ -108,20 +107,6 @@ export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose
             </NavLink>
           ))}
 
-          {onLogout && (
-            <button
-              type="button"
-              onClick={() => { onMobileClose?.(); onLogout(); }}
-              className="sidebar-link"
-              title={account?.email ? `Log out (${account.email})` : 'Log out'}
-              style={{ width: '100%', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', font: 'inherit' }}
-            >
-              <LogOut size={18} strokeWidth={1.75} className="sidebar-icon" />
-              <span className="sidebar-label" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                Log out{account?.email ? ` · ${account.email}` : ''}
-              </span>
-            </button>
-          )}
         </nav>
 
         {/* Sidebar Footer / Collapse toggle (desktop only) */}

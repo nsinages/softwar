@@ -2,7 +2,7 @@
 // N Signage V2 — Local Data Store
 // localStorage-backed config for devices/classrooms.
 // On the hosted website (cloud mode) the device list is a cache of the
-// logged-in account's devices, refreshed from /api/devices.
+// Pis added in this browser, refreshed from /api/devices.
 // =============================================
 
 const DEVICES_KEY = 'nsignage_devices';
@@ -76,7 +76,7 @@ export function clearAllDevices() {
   writeJson(DEVICES_KEY, []);
 }
 
-/** Replace the whole cached list (cloud mode: the account's devices). */
+/** Replace the whole cached list (cloud mode: this browser's devices). */
 export function replaceDevices(list) {
   writeJson(DEVICES_KEY, Array.isArray(list) ? list : []);
 }

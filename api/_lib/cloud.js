@@ -13,7 +13,7 @@
 // both use to reach the internet (same Wi-Fi → same router → same public IP).
 //
 // Storage (both added from the Vercel dashboard → Storage):
-//   - Upstash Redis  : accounts, sessions, device state, ownership, queues
+//   - Upstash Redis  : browser sessions, device state, queues
 //   - Vercel Blob    : uploaded media files (the Pi downloads them from here)
 // =============================================
 
@@ -25,7 +25,7 @@ export const NEARBY_WINDOW_MS = 2 * 60_000;      // Find Pi: Pi synced from this
 const NET_INDEX_TTL_S = 15 * 60;
 const COMMAND_TTL_S = 7 * 24 * 3600;
 const RESULT_TTL_S = 24 * 3600;
-const STALE_SECRET_MS = 10 * 60_000;             // unowned Pi offline this long may re-register (reflash)
+const STALE_SECRET_MS = 10 * 60_000;             // Pi not added anywhere, offline this long, may re-register (reflash)
 
 export const USERNAME_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
 export const DEVICE_ID_RX = /^[a-f0-9]{16}$/;
@@ -54,14 +54,12 @@ export function redis() {
 export const keys = {
   device: (id) => `ns:dev:${id}`,
   net: (netKey) => `ns:net:${netKey}`,
-  owner: (id) => `ns:owner:${id}`,
+  owners: (id) => `ns:owners:${id}`,             // set of browser ids that added this Pi
   commands: (id) => `ns:cmd:${id}`,
   results: (id) => `ns:res:${id}`,
   blobs: (id) => `ns:blob:${id}`,
-  account: (id) => `ns:acct:${id}`,
-  email: (email) => `ns:email:${email}`,
   session: (hash) => `ns:sess:${hash}`,
-  accountDevices: (id) => `ns:acct-devs:${id}`,
+  browserDevices: (id) => `ns:browser-devs:${id}`,
   nonce: (n) => `ns:nonce:${n}`,
   rate: (bucket, id) => `ns:rl:${bucket}:${id}`,
 };

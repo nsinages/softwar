@@ -1,47 +1,22 @@
 // =============================================
-// N Signage — Customer accounts and sessions (cloud mode)
+// N Signage — Browser sessions (cloud mode, no login)
 //
-// - Passwords: scrypt with a random salt per account (never stored or logged in clear)
-// - Sessions : random 256-bit token in an HttpOnly, Secure, SameSite=Lax cookie;
-//              only its SHA-256 is stored in Redis (30-day expiry)
-// - Devices  : a Pi belongs to exactly one account (ns:owner:<deviceId>)
+// Each browser gets an anonymous session automatically on its first visit:
+// a random 256-bit token in an HttpOnly, Secure, SameSite=Lax cookie. Only its
+// SHA-256 is stored in Redis. The Pis a browser adds are saved under that
+// browser's id, so they survive refreshes but not clearing the site's cookies
+// (the Pi can then simply be added again with Find Pi).
+//
+// A Pi can be controlled by several browsers (ns:owners:<deviceId>), because
+// without accounts there is no way to recover a lost browser session.
 // =============================================
 import crypto from 'node:crypto';
-import { promisify } from 'node:util';
 import {
   redis, keys, sha256, randomToken, httpError, getDevice, DEVICE_ID_RX, parse,
 } from './cloud.js';
 
-const scrypt = promisify(crypto.scrypt);
 const SESSION_COOKIE = 'ns_session';
-const SESSION_TTL_S = 30 * 24 * 3600;
-export const EMAIL_RX = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,63}$/;
-
-export async function hashPassword(password) {
-  const salt = crypto.randomBytes(16);
-  const key = await scrypt(password, salt, 64, { N: 16384, r: 8, p: 1 });
-  return `scrypt$${salt.toString('base64')}$${key.toString('base64')}`;
-}
-
-// Used when the email does not exist, so login time does not reveal that.
-const DUMMY_HASH = 'scrypt$AAAAAAAAAAAAAAAAAAAAAA==$' + Buffer.alloc(64).toString('base64');
-
-export async function verifyPassword(password, stored) {
-  const [alg, saltB64, keyB64] = String(stored || DUMMY_HASH).split('$');
-  if (alg !== 'scrypt' || !saltB64 || !keyB64) return false;
-  const expected = Buffer.from(keyB64, 'base64');
-  const actual = await scrypt(password, Buffer.from(saltB64, 'base64'), expected.length, { N: 16384, r: 8, p: 1 });
-  return crypto.timingSafeEqual(actual, expected) && Boolean(stored);
-}
-
-export function normalizeEmail(email) {
-  return String(email || '').trim().toLowerCase();
-}
-
-export function validatePassword(password) {
-  if (typeof password !== 'string' || password.length < 8) throw httpError(400, 'Password must be at least 8 characters.');
-  if (password.length > 200) throw httpError(400, 'Password is too long.');
-}
+const SESSION_TTL_S = 365 * 24 * 3600;
 
 // ---- Cookies ---------------------------------------------------------------
 
@@ -73,52 +48,47 @@ function sessionCookie(req, value, maxAge) {
 
 // ---- Sessions --------------------------------------------------------------
 
-export async function createSession(req, res, accountId) {
-  const token = randomToken();
-  await redis().set(keys.session(sha256(token)), { accountId, createdAt: Date.now() }, { ex: SESSION_TTL_S });
-  res.setHeader('Set-Cookie', sessionCookie(req, token, SESSION_TTL_S));
-}
-
-export async function destroySession(req, res) {
-  const token = readCookie(req, SESSION_COOKIE);
-  if (token && token.length <= 200) await redis().del(keys.session(sha256(token)));
-  res.setHeader('Set-Cookie', sessionCookie(req, '', 0));
-}
-
-/** The logged-in account, or null. */
-export async function currentAccount(req) {
+/** The browser's session record ({ id, createdAt }), or null. */
+export async function currentBrowser(req) {
   const token = readCookie(req, SESSION_COOKIE);
   if (!token || token.length < 20 || token.length > 200) return null;
   const session = await redis().get(keys.session(sha256(token)));
-  if (!session?.accountId) return null;
-  const account = await redis().get(keys.account(session.accountId));
-  return account || null;
+  return session?.id ? session : null;
 }
 
-export async function requireAccount(req) {
-  const account = await currentAccount(req);
-  if (!account) throw httpError(401, 'Please log in again.', 'not-logged-in');
-  return account;
+/** Existing session, or a new anonymous one (sets the cookie). */
+export async function ensureBrowser(req, res) {
+  const existing = await currentBrowser(req);
+  if (existing) return { browser: existing, created: false };
+  const token = randomToken();
+  const browser = { id: crypto.randomUUID(), createdAt: Date.now() };
+  await redis().set(keys.session(sha256(token)), browser, { ex: SESSION_TTL_S });
+  res.setHeader('Set-Cookie', sessionCookie(req, token, SESSION_TTL_S));
+  return { browser, created: true };
 }
 
-export const accountView = (a) => ({ id: a.id, email: a.email, name: a.name || null, createdAt: a.createdAt });
+export async function requireBrowser(req) {
+  const browser = await currentBrowser(req);
+  if (!browser) throw httpError(401, 'Your browser session expired. Reload the page.', 'no-session');
+  return browser;
+}
 
-// ---- Device ownership ------------------------------------------------------
+// ---- Device control --------------------------------------------------------
 
-export async function accountDeviceMeta(accountId) {
-  const raw = (await redis().hgetall(keys.accountDevices(accountId))) || {};
+export async function browserDeviceMeta(browserId) {
+  const raw = (await redis().hgetall(keys.browserDevices(browserId))) || {};
   const out = {};
   for (const [id, v] of Object.entries(raw)) out[id] = parse(v);
   return out;
 }
 
-/** Logged-in account that owns this Pi, plus the Pi's latest state. */
+/** Browser that added this Pi, plus the Pi's latest state. */
 export async function requireOwnedDevice(req, deviceId) {
   if (!DEVICE_ID_RX.test(deviceId || '')) throw httpError(400, 'Invalid device id');
-  const account = await requireAccount(req);
-  const owner = await redis().get(keys.owner(deviceId));
-  if (owner !== account.id) throw httpError(404, 'This Raspberry Pi is not registered in your account.', 'not-owner');
+  const browser = await requireBrowser(req);
+  const allowed = await redis().sismember(keys.owners(deviceId), browser.id);
+  if (!allowed) throw httpError(404, 'This Raspberry Pi has not been added in this browser. Use Find Pi to add it.', 'not-owner');
   const device = await getDevice(deviceId);
   if (!device) throw httpError(404, 'Raspberry Pi not found in the cloud');
-  return { account, device };
+  return { browser, device };
 }

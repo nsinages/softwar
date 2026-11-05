@@ -11,72 +11,60 @@ import Devices from './pages/Devices';
 import Media from './pages/Media';
 import Upload from './pages/Upload';
 import Settings from './pages/Settings';
-import Login from './pages/Login';
 import { getDevices, replaceDevices, DEVICES_CHANGED_EVENT } from './data/store';
 import { usePiStatus } from './hooks/usePiStatus';
-import { isCloudMode, syncCloudDevices, LOGGED_OUT_EVENT } from './api/cloudApi';
-import { getMe, logout } from './api/authApi';
+import { isCloudMode, syncCloudDevices, SESSION_LOST_EVENT } from './api/cloudApi';
+import { ensureSession } from './api/authApi';
 
 /**
- * Hosted website (cloud mode): customers log in, and their Raspberry Pis are
- * loaded from their account before the dashboard renders.
- * LAN mode (localhost / npm start) needs no login, exactly as before.
+ * Hosted website (cloud mode): no login. The browser gets an anonymous
+ * session automatically, and the Raspberry Pis added in this browser are
+ * loaded before the dashboard renders.
+ * LAN mode (localhost / npm start) works exactly as before.
  */
 export default function App() {
   const cloud = isCloudMode();
-  const [auth, setAuth] = useState(cloud ? { state: 'checking' } : { state: 'lan' });
+  const [boot, setBoot] = useState(cloud ? { state: 'starting' } : { state: 'ready' });
 
-  const enter = useCallback(async (account) => {
-    setAuth({ state: 'loading', account });
+  const start = useCallback(async (initial = false) => {
+    if (!initial) setBoot({ state: 'starting' });
+    const session = await ensureSession();
+    if (!session.ok) { setBoot({ state: 'error', error: session.error }); return; }
     const res = await syncCloudDevices();
-    if (!res.ok) replaceDevices([]); // never show a previous user's cached list
-    setAuth({ state: 'in', account, error: res.ok ? '' : res.error });
+    if (!res.ok) replaceDevices([]); // never show a stale cached list
+    setBoot({ state: 'ready', error: res.ok ? '' : res.error });
   }, []);
-
-  const check = useCallback(async (initial = false) => {
-    if (!initial) setAuth({ state: 'checking' });
-    const me = await getMe();
-    if (me.ok) enter(me.account);
-    else if (me.loggedOut) { replaceDevices([]); setAuth({ state: 'out' }); }
-    else setAuth({ state: 'error', error: me.error });
-  }, [enter]);
 
   useEffect(() => {
     if (!cloud) return undefined;
-    check(true);
-    const onLoggedOut = () => { replaceDevices([]); setAuth({ state: 'out' }); };
-    window.addEventListener(LOGGED_OUT_EVENT, onLoggedOut);
-    return () => window.removeEventListener(LOGGED_OUT_EVENT, onLoggedOut);
-  }, [cloud, check]);
+    start(true);
+    // Session cookie gone (cleared or expired): get a new one silently
+    const onLost = () => start();
+    window.addEventListener(SESSION_LOST_EVENT, onLost);
+    return () => window.removeEventListener(SESSION_LOST_EVENT, onLost);
+  }, [cloud, start]);
 
-  async function handleLogout() {
-    await logout();
-    replaceDevices([]);
-    setAuth({ state: 'out' });
-  }
-
-  if (auth.state === 'out') return <Login onLoggedIn={enter} />;
-  if (auth.state === 'checking' || auth.state === 'loading') {
+  if (boot.state === 'starting') {
     return (
-      <div className="auth-screen">
+      <div className="boot-screen">
         <Loader2 size={22} style={{ animation: 'spin 0.8s linear infinite', color: 'var(--accent)' }} />
       </div>
     );
   }
-  if (auth.state === 'error') {
+  if (boot.state === 'error') {
     return (
-      <div className="auth-screen">
-        <div className="card auth-card">
-          <div className="alert alert-danger"><AlertTriangle size={15} className="alert-icon" /><span>{auth.error}</span></div>
-          <button className="btn btn-secondary" onClick={() => check()}><RotateCw size={14} /> Try again</button>
+      <div className="boot-screen">
+        <div className="card boot-card">
+          <div className="alert alert-danger"><AlertTriangle size={15} className="alert-icon" /><span>{boot.error}</span></div>
+          <button className="btn btn-secondary" onClick={() => start()}><RotateCw size={14} /> Try again</button>
         </div>
       </div>
     );
   }
-  return <Shell account={auth.account} onLogout={cloud ? handleLogout : undefined} loadError={auth.error} />;
+  return <Shell loadError={boot.error} />;
 }
 
-function Shell({ account, onLogout, loadError }) {
+function Shell({ loadError }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const { statusMap } = usePiStatus();
@@ -105,8 +93,6 @@ function Shell({ account, onLogout, loadError }) {
           onToggle={() => setSidebarCollapsed(c => !c)}
           mobileOpen={mobileSidebarOpen}
           onMobileClose={() => setMobileSidebarOpen(false)}
-          account={account}
-          onLogout={onLogout}
         />
         <div className="main-content">
           <TopBar

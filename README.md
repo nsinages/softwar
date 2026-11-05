@@ -24,20 +24,20 @@ Device list and settings are stored in each browser's `localStorage`.
 A website hosted on the internet (Vercel) can never connect to a Pi on a
 customer's Wi-Fi, and browsers cannot do UDP/mDNS discovery. When the site is
 opened from a public domain it switches to **cloud mode** automatically:
-customers log in, every Pi connects *out* to the website, and "Find Pi" lists
-the Pis that synced from the customer's own network (same public IP).
+every Pi connects *out* to the website, and "Find Pi" lists the Pis that
+synced from the customer's own network (same public IP). There is no login;
+each browser gets an anonymous session cookie automatically.
 
 ```
 Pi (cloud_agent.py) ──every 5 s──►  POST /api/pi/sync   ◄── queued commands (download / delete)
-Browser ──► /api/auth     log in / create account (HttpOnly session cookie)
+Browser ──► /api/auth     anonymous browser session (HttpOnly cookie, no login)
         ──► /api/find     Pis on the SAME Wi-Fi as the browser (no username needed)
-        ──► /api/devices  Add Device (single-use nonce) / rename / remove — stored in the account
+        ──► /api/devices  Add Device (single-use nonce) / rename / remove — saved per browser
         ──► /api/device   status, media list, delete; uploads go to Vercel Blob, the Pi downloads them
 ```
 
 A Pi can only be **added** from a phone or computer on the same Wi-Fi as the
-Pi. After that it can be managed from anywhere, on any device the customer
-logs in from.
+Pi. After that it can be managed from anywhere in that browser.
 
 **Setup, Pi install, customer/staff instructions, security and limitations:**
 see [docs/CLOUD-DISCOVERY.md](docs/CLOUD-DISCOVERY.md).

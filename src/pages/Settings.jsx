@@ -165,7 +165,7 @@ export default function Settings() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
             {[
               ['Platform', 'N-Signage Digital Signage System'],
-              ['Version', '4.6.0 (Cloud accounts + Find Pi)'],
+              ['Version', '4.6.0 (Cloud Find Pi)'],
               ['Architecture', 'Decentralized Edge Nodes + Central Management Console'],
               ['Communication Protocol', 'Direct REST API over LAN / Wi-Fi'],
               ['Device Storage', 'Client-side LocalStorage + Raspberry Pi FS'],
@@ -190,7 +190,7 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* Reset Database Section (LAN mode only: in cloud mode devices live in the account) */}
+        {/* Reset Database Section (LAN mode only: in cloud mode devices are kept in the cloud) */}
         {!isCloudMode() && (
         <div className="card" style={{ borderColor: 'rgba(239, 68, 68, 0.25)' }}>
           <div className="card-header">

@@ -1,5 +1,5 @@
 // /api/device?deviceId=<id>&action=<action> — manage a Pi through the cloud.
-// Every action needs a logged-in session (cookie) whose account owns the Pi.
+// Every action needs the browser session cookie of a browser that added the Pi.
 //
 //   GET  action=status            last state reported by the Pi
 //   GET  action=media             media files on the Pi (+ preview URLs)

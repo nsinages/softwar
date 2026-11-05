@@ -9,7 +9,7 @@
 // =============================================
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Wifi, Search, CheckCircle2, AlertTriangle, RotateCw, Loader2, Plus, Lock, Terminal,
+  Wifi, Search, CheckCircle2, AlertTriangle, RotateCw, Loader2, Plus, Terminal,
 } from 'lucide-react';
 import { cloudFindPi, cloudClaim } from '../api/cloudApi';
 import { isDiscoveryDebug } from '../api/discoveryApi';
@@ -22,7 +22,7 @@ const FAILURE_TEXT = {
   'cloud-not-configured': 'The N-Signage cloud service is not available right now (server storage is not configured). This is a website problem, not a problem with your Pi — please contact support.',
   'cloud-unreachable': 'Could not reach the N-Signage cloud service. Check this phone or computer\'s internet connection.',
   'cloud-error': 'The N-Signage cloud service returned an error.',
-  'not-logged-in': 'Your login has expired. Please log in again.',
+  'no-session': 'Your browser session expired. Reload the page and try again.',
   'rate-limited': 'Too many searches. Wait a minute and try again.',
 };
 
@@ -69,7 +69,7 @@ export default function CloudFindPi({ onAdded }) {
       const r = await cloudFindPi(username);
       if (id !== run.current) return; // superseded or unmounted
       setResult(r);
-      const hard = r.reason && !['not-found', 'only-other-accounts'].includes(r.reason);
+      const hard = r.reason && r.reason !== 'not-found';
       if (hard) { setPhase('error'); return; }
       if (r.devices.some((d) => d.ownership === 'available')) { setPhase('done'); return; }
       const secs = Math.round((Date.now() - started) / 1000);
@@ -103,7 +103,7 @@ export default function CloudFindPi({ onAdded }) {
     setAddingId(null);
     if (res.ok) { onAdded?.(res.device); return; }
     setAddError(res.error);
-    if (res.reason === 'nonce-expired' || res.reason === 'duplicate' || res.reason === 'owned-by-other') search();
+    if (res.reason === 'nonce-expired' || res.reason === 'duplicate') search();
   }
 
   const devices = result?.devices || [];
@@ -160,18 +160,6 @@ export default function CloudFindPi({ onAdded }) {
           )}
           {devices.map((d) => (
             <div key={d.deviceId} className="found-pi">
-              {d.ownership === 'other' ? (
-                <>
-                  <div className="found-pi-details">
-                    <span>Hostname:</span><span>{d.hostname || '—'}</span>
-                    <span>Status:</span><span><Status online={d.online} /></span>
-                  </div>
-                  <span className="badge" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-                    <Lock size={12} /> Registered to another account
-                  </span>
-                </>
-              ) : (
-                <>
                   <div className="found-pi-details">
                     <span>Username:</span><span>{d.username}</span>
                     <span>Hostname:</span><span>{d.hostname || '—'}</span>
@@ -182,7 +170,7 @@ export default function CloudFindPi({ onAdded }) {
                   </div>
                   {d.ownership === 'mine' ? (
                     <span style={{ fontSize: 'var(--text-xs)', color: 'var(--success)', display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-                      <CheckCircle2 size={13} /> Already in your account
+                      <CheckCircle2 size={13} /> Already added
                     </span>
                   ) : (
                     <button type="button" className="btn btn-primary btn-sm" onClick={() => add(d)} disabled={Boolean(addingId)}>
@@ -191,8 +179,6 @@ export default function CloudFindPi({ onAdded }) {
                         : <><Plus size={13} /> Add Device</>}
                     </button>
                   )}
-                </>
-              )}
             </div>
           ))}
         </div>

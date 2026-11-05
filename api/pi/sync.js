@@ -24,13 +24,13 @@ export default async function handler(req, res) {
     let secretHash = existing?.secretHash;
     if (existing?.secretHash && !safeEqual(existing.secretHash, sha256(secret))) {
       // A re-flashed SD card creates a new secret. Accept it only for a Pi that
-      // no account owns and that has been silent for a while; owned Pis must be
-      // removed from their account first (that clears the stored secret).
-      const owned = Boolean(await r.get(keys.owner(deviceId)));
+      // no browser has added and that has been silent for a while; otherwise it
+      // must be removed in every browser first (that clears the stored secret).
+      const owned = (await r.scard(keys.owners(deviceId))) > 0;
       if (!canReplaceSecret(existing, owned, now)) {
-        throw httpError(401, 'Device secret does not match. Remove this Pi from its account on the website, then it can re-register.');
+        throw httpError(401, 'Device secret does not match. Remove this Pi on the website (Devices → delete), then it can re-register.');
       }
-      console.warn('[N-SIGNAGE CLOUD] device secret replaced for unowned device', deviceId);
+      console.warn('[N-SIGNAGE CLOUD] device secret replaced for a Pi no browser has added', deviceId);
       secretHash = null;
     }
 

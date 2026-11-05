@@ -29,16 +29,16 @@ export function connectionMode() {
 
 export const isCloudMode = () => connectionMode() === 'cloud';
 
-/** A Pi registered in the logged-in customer's cloud account. */
+/** A Pi added in this browser through the cloud relay. */
 export const isCloudDevice = (device) => Boolean(device?.cloud && device?.piDeviceId);
 
-/** Fired when any cloud call reports that the session has ended. */
-export const LOGGED_OUT_EVENT = 'nsignage:logged-out';
+/** Fired when any cloud call reports that the browser session is missing. */
+export const SESSION_LOST_EVENT = 'nsignage:session-lost';
 
 function cloudError(error, context) {
   const data = error.response?.data;
-  if (error.response?.status === 401 && data?.reason === 'not-logged-in') {
-    try { window.dispatchEvent(new Event(LOGGED_OUT_EVENT)); } catch { /* non-browser */ }
+  if (error.response?.status === 401 && data?.reason === 'no-session') {
+    try { window.dispatchEvent(new Event(SESSION_LOST_EVENT)); } catch { /* non-browser */ }
   }
   if (data?.error) return `${context} failed: ${data.error}`;
   if (error.code === 'ECONNABORTED') return `${context} timed out. Check your internet connection.`;
@@ -78,7 +78,7 @@ export async function cloudFindPi(identifier = '') {
   }
 }
 
-/** Store-shaped record for a Pi in the account (see data/store.js). */
+/** Store-shaped record for a Pi added in this browser (see data/store.js). */
 function toStoreDevice(d) {
   return {
     id: `cloud-${d.deviceId}`,
@@ -96,7 +96,7 @@ function toStoreDevice(d) {
   };
 }
 
-/** Load the account's Pis from the cloud into the local device cache. */
+/** Load this browser's Pis from the cloud into the local device cache. */
 export async function syncCloudDevices() {
   try {
     const res = await axios.get('/api/devices', { timeout: 15000 });
@@ -108,7 +108,7 @@ export async function syncCloudDevices() {
   }
 }
 
-/** Add Device: register a Pi found by cloudFindPi in this account. */
+/** Add Device: save a Pi found by cloudFindPi in this browser. */
 export async function cloudClaim(claimNonce, { name, location } = {}) {
   try {
     const res = await axios.post('/api/devices', { claimNonce, name, location }, { timeout: 15000 });
