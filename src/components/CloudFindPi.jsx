@@ -22,7 +22,7 @@ const FAILURE_TEXT = {
   'cloud-not-configured': 'The N-Signage cloud service is not available right now (server storage is not configured). This is a website problem, not a problem with your Pi — please contact support.',
   'cloud-unreachable': 'Could not reach the N-Signage cloud service. Check this phone or computer\'s internet connection.',
   'cloud-error': 'The N-Signage cloud service returned an error.',
-  'no-session': 'Your browser session expired. Reload the page and try again.',
+  'not-logged-in': 'Your login session ended. Please log in again.',
   'rate-limited': 'Too many searches. Wait a minute and try again.',
 };
 
@@ -170,7 +170,15 @@ export default function CloudFindPi({ onAdded }) {
                   </div>
                   {d.ownership === 'mine' ? (
                     <span style={{ fontSize: 'var(--text-xs)', color: 'var(--success)', display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-                      <CheckCircle2 size={13} /> Already added
+                      <CheckCircle2 size={13} /> In your account
+                    </span>
+                  ) : d.ownership === 'other' ? (
+                    <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                      Registered to another account
+                    </span>
+                  ) : !d.claimNonce ? (
+                    <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                      Use the pairing code shown on this display
                     </span>
                   ) : (
                     <button type="button" className="btn btn-primary btn-sm" onClick={() => add(d)} disabled={Boolean(addingId)}>

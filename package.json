@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "start": "node server/index.js",
-    "lint": "oxlint src server discovery api",
+    "lint": "oxlint src server discovery api shared tests scripts",
     "preview": "vite preview",
-    "discovery": "node discovery/server.js"
+    "discovery": "node discovery/server.js",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "admin": "node scripts/nsignage-admin.mjs"
   },
   "dependencies": {
     "@upstash/redis": "^1.41.0",

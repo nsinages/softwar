@@ -11,7 +11,9 @@ import {
   Film,
   Image as ImageIcon,
 } from 'lucide-react';
-import { ALLOWED_EXT, ALLOWED_TYPES } from '../api/piApi';
+import { checkMediaFile, mediaTypeOf, MEDIA_TYPES } from '../../shared/mediaTypes';
+
+const ACCEPT = Object.keys(MEDIA_TYPES).map((e) => `.${e}`).join(',');
 import { getSettings } from '../data/store';
 
 export default function UploadPanel({ onFileSelect, selectedFile, disabled = false }) {
@@ -35,8 +37,9 @@ export default function UploadPanel({ onFileSelect, selectedFile, disabled = fal
   function validateAndSelect(file) {
     if (!file || disabled) return;
     setError('');
-    if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXT.test(file.name)) {
-      setError(`Unsupported format: "${file.name}". Allowed: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV`);
+    const typeError = checkMediaFile(file.name, file.type);
+    if (typeError) {
+      setError(`"${file.name}": ${typeError}`);
       return;
     }
     const sizeMB = file.size / (1024 * 1024);
@@ -59,8 +62,8 @@ export default function UploadPanel({ onFileSelect, selectedFile, disabled = fal
   }
 
   if (selectedFile) {
-    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(selectedFile.name);
-    const isVideo = /\.(mp4|m4v|webm|mov)$/i.test(selectedFile.name);
+    const isImage = mediaTypeOf(selectedFile.name)?.kind === 'image';
+    const isVideo = mediaTypeOf(selectedFile.name)?.kind === 'video';
     const sizeMB = (selectedFile.size / (1024 * 1024)).toFixed(2);
 
     return (
@@ -195,7 +198,7 @@ export default function UploadPanel({ onFileSelect, selectedFile, disabled = fal
       <input
         ref={inputRef}
         type="file"
-        accept=".jpg,.jpeg,.png,.gif,.webp,.mp4,.m4v,.webm,.mov"
+        accept={ACCEPT}
         style={{ display: 'none' }}
         onChange={handleChange}
       />

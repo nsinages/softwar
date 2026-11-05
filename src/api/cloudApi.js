@@ -7,8 +7,8 @@
 // same relay (N-Signage/app/cloud_agent.py).
 // =============================================
 import axios from 'axios';
-import { upload } from '@vercel/blob/client';
 import { replaceDevices } from '../data/store';
+import { LOGGED_OUT_EVENT } from './authApi';
 
 const PRIVATE_HOST_RX = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?$)|\.local$/i;
 
@@ -32,14 +32,19 @@ export const isCloudMode = () => connectionMode() === 'cloud';
 /** A Pi added in this browser through the cloud relay. */
 export const isCloudDevice = (device) => Boolean(device?.cloud && device?.piDeviceId);
 
-/** Fired when any cloud call reports that the browser session is missing. */
-export const SESSION_LOST_EVENT = 'nsignage:session-lost';
-
-function cloudError(error, context) {
-  const data = error.response?.data;
-  if (error.response?.status === 401 && data?.reason === 'no-session') {
-    try { window.dispatchEvent(new Event(SESSION_LOST_EVENT)); } catch { /* non-browser */ }
+/** Tell the app the login session is gone (expired, revoked, password changed elsewhere). */
+export function notifyIfLoggedOut(error) {
+  const data = error?.response?.data;
+  if (error?.response?.status === 401 && data?.reason === 'not-logged-in') {
+    try { window.dispatchEvent(new Event(LOGGED_OUT_EVENT)); } catch { /* non-browser */ }
+    return true;
   }
+  return false;
+}
+
+export function cloudError(error, context) {
+  const data = error.response?.data;
+  notifyIfLoggedOut(error);
   if (data?.error) return `${context} failed: ${data.error}`;
   if (error.code === 'ECONNABORTED') return `${context} timed out. Check your internet connection.`;
   if (error.response?.status === 404) return `${context} failed: the cloud service is not available on this website yet.`;
@@ -61,6 +66,7 @@ export async function cloudFindPi(identifier = '') {
     const res = await axios.get(`/api/find${q}`, { timeout: 15000 });
     return { log: [], devices: [], ...res.data };
   } catch (error) {
+    notifyIfLoggedOut(error);
     const data = error.response?.data;
     const status = error.response?.status;
     // 503 = relay up but its storage is not configured/reachable; no response = network/timeout
@@ -92,15 +98,24 @@ function toStoreDevice(d) {
     port: d.port || 5000,
     online: d.online,
     lastSeen: d.lastSeen,
+    agentVersion: d.agentVersion || null,
+    capabilities: d.capabilities || [],
+    storage: d.storage || null,
+    addedVia: d.via || null,
     createdAt: d.addedAt ? new Date(d.addedAt).toISOString() : undefined,
   };
 }
 
-/** Load this browser's Pis from the cloud into the local device cache. */
+let networkClaimAllowed = true;
+/** False when the server only accepts pairing codes (NSIGNAGE_NETWORK_CLAIM=off). */
+export const isNetworkClaimAllowed = () => networkClaimAllowed;
+
+/** Load this account's Pis from the cloud into the local device cache. */
 export async function syncCloudDevices() {
   try {
     const res = await axios.get('/api/devices', { timeout: 15000 });
     const list = (res.data.devices || []).map(toStoreDevice);
+    networkClaimAllowed = res.data.networkClaim !== false;
     replaceDevices(list);
     return { ok: true, devices: list };
   } catch (error) {
@@ -108,7 +123,7 @@ export async function syncCloudDevices() {
   }
 }
 
-/** Add Device: save a Pi found by cloudFindPi in this browser. */
+/** Add Device: register a Pi found by cloudFindPi (same Wi-Fi) to this account. */
 export async function cloudClaim(claimNonce, { name, location } = {}) {
   try {
     const res = await axios.post('/api/devices', { claimNonce, name, location }, { timeout: 15000 });
@@ -116,6 +131,37 @@ export async function cloudClaim(claimNonce, { name, location } = {}) {
     return { ok: true, device: toStoreDevice(res.data.device) };
   } catch (error) {
     return { ok: false, reason: error.response?.data?.reason, error: cloudError(error, 'Adding the device') };
+  }
+}
+
+/** Add Device with the one-time pairing code shown on the display. */
+export async function cloudPair(code, { name, location } = {}) {
+  try {
+    const res = await axios.post('/api/devices?action=pair', { code, name, location }, { timeout: 15000 });
+    await syncCloudDevices();
+    return { ok: true, device: toStoreDevice(res.data.device) };
+  } catch (error) {
+    return { ok: false, reason: error.response?.data?.reason, error: cloudError(error, 'Adding the device') };
+  }
+}
+
+/** Pis added in this browser before customer accounts existed (one-time link). */
+export async function cloudLegacyDevices() {
+  try {
+    const res = await axios.get('/api/devices?action=legacy', { timeout: 15000 });
+    return { ok: true, available: res.data.available, devices: res.data.devices || [] };
+  } catch (error) {
+    return { ok: false, error: cloudError(error, 'Checking older devices') };
+  }
+}
+
+export async function cloudLinkLegacy(deviceId, code = '') {
+  try {
+    await axios.post('/api/devices?action=link-legacy', { deviceId, ...(code && { code }) }, { timeout: 15000 });
+    await syncCloudDevices();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: error.response?.data?.reason, error: cloudError(error, 'Linking the device') };
   }
 }
 
@@ -163,6 +209,9 @@ export async function cloudMedia(device) {
   }
 }
 
+// Uploads to cloud devices go through ./transferApi.js (relay transfers with
+// checksums, cancel/retry, and success only after the Pi confirms).
+
 async function sendCommand(device, command) {
   const res = await axios.post(deviceUrl(device, 'command'), command, { timeout: 15000 });
   return res.data.command;
@@ -186,48 +235,6 @@ async function waitForCommand(device, id, timeoutMs) {
     }
   }
   return { state: 'queued' };
-}
-
-const safeName = (name) =>
-  name.replace(/[^A-Za-z0-9._ ()-]/g, '_').replace(/^[^A-Za-z0-9]+/, '').slice(-180) || 'media';
-
-/**
- * Upload a file to the cloud, then ask the Pi to download it.
- * Progress: 0–90 % = upload to cloud, 90–100 % = Pi downloading.
- */
-export async function cloudUpload(device, file, onProgress) {
-  const filename = safeName(file.name);
-  let blob;
-  try {
-    blob = await upload(`media/${device.piDeviceId}/${filename}`, file, {
-      access: 'public',
-      handleUploadUrl: '/api/device?action=upload',
-      clientPayload: JSON.stringify({ deviceId: device.piDeviceId }),
-      multipart: file.size > 20 * 1024 * 1024,
-      contentType: file.type || undefined,
-      onUploadProgress: ({ percentage }) => onProgress?.(Math.round(percentage * 0.9)),
-    });
-  } catch (error) {
-    return { ok: false, error: `Upload to cloud failed: ${error.message || 'unknown error'}` };
-  }
-
-  let cmd;
-  try {
-    cmd = await sendCommand(device, { type: 'download', url: blob.url, filename, size: file.size });
-  } catch (error) {
-    return { ok: false, error: cloudError(error, 'Sending to the Raspberry Pi') };
-  }
-
-  // Large videos take a while for a Pi to download; allow ~1 min + 10 s/MB
-  const result = await waitForCommand(device, cmd.id, 60000 + (file.size / (1024 * 1024)) * 10000);
-  onProgress?.(100);
-  if (result.state === 'done') return { ok: true, data: { filename: result.filename || filename } };
-  if (result.state === 'failed') return { ok: false, error: `The Raspberry Pi could not save the file: ${result.error}` };
-  return {
-    ok: true,
-    data: { filename, queued: true },
-    message: 'Uploaded to the cloud. The Raspberry Pi will download it as soon as it is online.',
-  };
 }
 
 export async function cloudDelete(device, filename) {

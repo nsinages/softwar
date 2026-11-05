@@ -1,6 +1,7 @@
 // GET /api/health — is the cloud relay configured and reachable?
 // Reports only true/false flags; never returns or logs secret values.
 import { redis, redisConfigured, send } from './_lib/cloud.js';
+import { blobAccess } from './_lib/blobStore.js';
 
 export default async function handler(req, res) {
   const blob = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
@@ -19,7 +20,8 @@ export default async function handler(req, res) {
   send(res, ok ? 200 : 503, {
     ok,
     redis: { configured, reachable },
-    blob: { configured: blob },
+    blob: { configured: blob, access: blobAccess() },
+    cron: { configured: Boolean(process.env.CRON_SECRET) },
     ...(!configured && { error: 'Upstash Redis is not connected to this Vercel project.' }),
     ...(error && { error }),
   });

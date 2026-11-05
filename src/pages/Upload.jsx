@@ -1,7 +1,7 @@
 // =============================================
 // N Signage — Multi-Device Upload Page
 // =============================================
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   UploadCloud,
@@ -14,11 +14,17 @@ import {
   Check,
   Loader2,
   HelpCircle,
+  X,
 } from 'lucide-react';
 import { getDevices } from '../data/store';
 import { getPiStatus, uploadMedia } from '../api/piApi';
-import { isCloudDevice } from '../api/cloudApi';
+import { isCloudDevice, isCloudMode } from '../api/cloudApi';
+import { sendFileViaRelay, retryTransferWithFile, precheckFile } from '../api/transferApi';
+import { IMAGE_EXTS, VIDEO_EXTS } from '../../shared/mediaTypes';
 import UploadPanel from '../components/UploadPanel';
+import TransferStatus from '../components/TransferStatus';
+import { isActive } from '../utils/transferFormat';
+import RecentTransfers from '../components/RecentTransfers';
 import StatusBadge from '../components/StatusBadge';
 
 const STEP = { SELECT: 1, FILE: 2, UPLOADING: 3, RESULT: 4 };
@@ -39,6 +45,12 @@ export default function Upload() {
 
   const [uploadStates, setUploadStates] = useState({});
   const [step, setStep] = useState(STEP.SELECT);
+  const [fileError, setFileError] = useState('');
+  const [historyKey, setHistoryKey] = useState(0);
+  const controllers = useRef({});   // device id -> AbortController (cloud transfers)
+  const speeds = useRef({});        // device id -> { t, b, rate }
+  const sentFile = useRef(null);    // the file of the current deployment (for retries)
+  const cloud = isCloudMode();
 
   const devicesList = useMemo(() => {
     let list = getDevices();
@@ -106,79 +118,187 @@ export default function Upload() {
   const canProceedToFile = selectedDevices.length > 0;
   const canUpload = selectedFile && selectedDevices.length > 0 && step !== STEP.UPLOADING;
 
+  function patch(id, u) {
+    setUploadStates(prev => ({ ...prev, [id]: { ...prev[id], ...u } }));
+  }
+
+  // Map a relay transfer update to this page's per-device state
+  function onRelayUpdate(id, u) {
+    const next = { relay: true };
+    if (u.transferId) next.transferId = u.transferId;
+    if (u.error) next.error = u.error;
+    switch (u.phase) {
+      case 'hashing':
+        next.status = 'hashing';
+        next.progress = u.total ? Math.round((u.loaded / u.total) * 100) : 0;
+        break;
+      case 'uploading': {
+        next.status = 'uploading';
+        if (u.total) {
+          const now = performance.now();
+          const sp = speeds.current[id] || { t: now, b: 0, rate: 0 };
+          const dt = (now - sp.t) / 1000;
+          if (dt >= 0.5) {
+            const inst = (u.loaded - sp.b) / dt;
+            sp.rate = sp.rate ? sp.rate * 0.7 + inst * 0.3 : inst;
+            sp.t = now;
+            sp.b = u.loaded;
+          }
+          speeds.current[id] = sp;
+          next.progress = Math.round((u.loaded / u.total) * 100);
+          next.speed = sp.rate;
+          next.eta = sp.rate > 0 ? (u.total - u.loaded) / sp.rate : null;
+        }
+        break;
+      }
+      case 'confirming':
+        next.status = 'confirming';
+        break;
+      case 'waiting':
+        next.status = 'waiting-live';
+        next.received = Number.isFinite(u.loaded) && u.loaded > 0;
+        next.progress = next.received && u.total ? Math.round((u.loaded / u.total) * 100) : 0;
+        break;
+      case 'completed':
+        next.status = 'success';
+        next.verified = Boolean(u.transfer?.verified);
+        next.savedAs = u.transfer?.savedAs;
+        next.error = undefined;
+        break;
+      case 'cancelled':
+        next.status = 'cancelled';
+        next.error = 'Cancelled. Nothing was saved on the display.';
+        break;
+      default:
+        next.status = 'failed';
+    }
+    patch(id, next);
+  }
+
+  // Final state from a relay result: "success" ONLY when the display confirmed
+  function settleRelay(id, r) {
+    if (r.ok) {
+      patch(id, { status: 'success', verified: Boolean(r.transfer?.verified), savedAs: r.transfer?.savedAs, error: undefined });
+    } else if (r.phase === 'waiting') {
+      patch(id, { status: 'waiting' });
+    } else if (r.phase === 'cancelled') {
+      patch(id, { status: 'cancelled', error: 'Cancelled. Nothing was saved on the display.' });
+    } else {
+      patch(id, {
+        status: 'failed',
+        error: r.error || (r.phase === 'expired' ? 'The transfer expired.' : 'Transfer failed.'),
+        ...(r.transferId && { transferId: r.transferId }),
+      });
+    }
+  }
+
+  async function runRelay(id, device, file, transferId = null) {
+    const ac = new AbortController();
+    controllers.current[id] = ac;
+    speeds.current[id] = null;
+    patch(id, { status: 'hashing', progress: 0, error: undefined, relay: true });
+    const opts = { signal: ac.signal, waitMs: 3 * 60 * 1000, onUpdate: u => onRelayUpdate(id, u) };
+    const r = transferId
+      ? await retryTransferWithFile(transferId, file, opts)
+      : await sendFileViaRelay(device, file, opts);
+    delete controllers.current[id];
+    settleRelay(id, r);
+    setHistoryKey(k => k + 1);
+  }
+
+  async function runLan(id, device, file) {
+    patch(id, { status: 'uploading', progress: 0 });
+    const statusRes = await getPiStatus(device);
+    if (!statusRes.ok) {
+      patch(id, { status: 'failed', error: 'Raspberry Pi is unreachable on local network' });
+      return;
+    }
+    const result = await uploadMedia(device, file, pct => patch(id, { progress: pct }));
+    patch(id, { status: result.ok ? 'success' : 'failed', error: result.ok ? undefined : result.error });
+  }
+
   async function handleUpload() {
     if (!selectedFile || selectedDevices.length === 0 || isUploading) return;
-    setStep(STEP.UPLOADING);
+    setFileError('');
 
     // Snapshot targets and file so later UI changes cannot alter a running deployment
     const targets = [...selectedDevices];
     const file = selectedFile;
     const allDevices = getDevices();
 
-    const initial = {};
-    targets.forEach(id => {
-      initial[id] = { progress: 0, status: 'pending' };
-    });
-    setUploadStates(initial);
-
-    for (const id of targets) {
-      const device = allDevices.find(c => c.id === id);
-      if (!device) {
-        setUploadStates(prev => ({
-          ...prev,
-          [id]: { ...prev[id], status: 'failed', error: 'Device no longer exists' },
-        }));
-        continue;
-      }
-
-      setUploadStates(prev => ({
-        ...prev,
-        [id]: { ...prev[id], status: 'uploading' },
-      }));
-
-      // Cloud devices may be offline: the upload is queued and the Pi
-      // downloads it when it reconnects.
-      const statusRes = await getPiStatus(device);
-      if (!statusRes.ok && !isCloudDevice(device)) {
-        setUploadStates(prev => ({
-          ...prev,
-          [id]: {
-            ...prev[id],
-            status: 'failed',
-            error: 'Raspberry Pi is unreachable on local network',
-          },
-        }));
-        continue;
-      }
-
-      const result = await uploadMedia(device, file, pct => {
-        setUploadStates(prev => ({
-          ...prev,
-          [id]: { ...prev[id], progress: pct },
-        }));
-      });
-
-      setUploadStates(prev => ({
-        ...prev,
-        [id]: {
-          ...prev[id],
-          status: result.ok ? 'success' : 'failed',
-          error: result.ok ? undefined : result.error,
-        },
-      }));
+    // Cloud: check type, real content (magic bytes) before anything is uploaded
+    if (targets.some(id => isCloudDevice(allDevices.find(c => c.id === id)))) {
+      const err = await precheckFile(file);
+      if (err) { setFileError(err); return; }
     }
 
+    sentFile.current = file;
+    setStep(STEP.UPLOADING);
+    const initial = {};
+    targets.forEach(id => { initial[id] = { progress: 0, status: 'pending' }; });
+    setUploadStates(initial);
+
+    // One display at a time, so each upload gets the full connection
+    for (const id of targets) {
+      if (cancelledAll.current) break;
+      const device = allDevices.find(c => c.id === id);
+      if (!device) {
+        patch(id, { status: 'failed', error: 'Device no longer exists' });
+        continue;
+      }
+      if (isCloudDevice(device)) await runRelay(id, device, file);
+      else await runLan(id, device, file);
+    }
+    cancelledAll.current = false;
     setStep(STEP.RESULT);
+  }
+
+  const cancelledAll = useRef(false);
+
+  function cancelOne(id) {
+    controllers.current[id]?.abort();
+  }
+
+  function cancelAll() {
+    cancelledAll.current = true;
+    Object.values(controllers.current).forEach(c => c.abort());
+    // Displays not started yet are skipped
+    setUploadStates(prev => Object.fromEntries(Object.entries(prev).map(([k, v]) => [
+      k, v.status === 'pending' ? { ...v, status: 'cancelled', error: 'Cancelled before it started.' } : v,
+    ])));
+  }
+
+  async function retryOne(id) {
+    const device = getDevices().find(c => c.id === id);
+    const state = uploadStates[id] || {};
+    const file = sentFile.current || selectedFile;
+    if (!device || !file) return;
+    if (isCloudDevice(device)) {
+      // A failed transfer is retried (relay copy reused when it still exists);
+      // a cancelled one is sent again as a new transfer.
+      await runRelay(id, device, file, state.status === 'failed' ? state.transferId : null);
+    } else {
+      await runLan(id, device, file);
+    }
   }
 
   function handleReset() {
     setSelectedFile(null);
     setUploadStates({});
+    setFileError('');
+    sentFile.current = null;
     setStep(STEP.SELECT);
   }
 
-  const overallSuccess = Object.values(uploadStates).every(s => s.status === 'success');
-  const overallFailure = Object.values(uploadStates).every(s => s.status === 'failed');
+  // A pending/waiting display is NOT a success
+  const states = Object.values(uploadStates);
+  const overallSuccess = states.length > 0 && states.every(st => st.status === 'success');
+  const overallFailure = states.length > 0 && states.every(st => ['failed', 'cancelled'].includes(st.status));
+  const anyWaiting = states.some(st => st.status === 'waiting' || isActive(st));
+  const resultTitle = overallSuccess ? 'Deployment Complete'
+    : overallFailure ? 'Deployment Failed'
+    : anyWaiting ? 'Waiting for Some Displays'
+    : 'Deployment Partially Complete';
 
   return (
     <div>
@@ -411,56 +531,16 @@ export default function Upload() {
 
               {step === STEP.UPLOADING ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-                  <div className="alert alert-info" style={{ fontSize: 'var(--text-xs)' }}>
+                  <div className="alert alert-info" style={{ fontSize: 'var(--text-xs)', alignItems: 'center' }}>
                     <Loader2 size={14} className="spinner" style={{ border: 'none', animation: 'spin 0.8s linear infinite' }} />
-                    <span>Sequential deployment in progress. Please keep this browser window open.</span>
+                    <span style={{ flex: 1 }}>Sending to each display in turn. Please keep this browser window open.</span>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={cancelAll}><X size={12} /> Cancel all</button>
                   </div>
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                    {selectedDevices.map(id => {
-                      const state = uploadStates[id] || { progress: 0, status: 'pending' };
-                      const device = getDevices().find(c => c.id === id);
-
-                      return (
-                        <div
-                          key={id}
-                          style={{
-                            background: 'var(--bg-elevated)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: '10px 14px',
-                            border: '1px solid var(--border)',
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <span style={{ fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>
-                                {device?.deviceId}
-                              </span>
-                              <span className="ip-chip" style={{ fontSize: '11px' }}>{device?.ip}</span>
-                            </div>
-
-                            <span style={{ fontSize: 'var(--text-xs)', fontWeight: 'var(--weight-medium)' }}>
-                              {state.status === 'pending' && <span style={{ color: 'var(--text-muted)' }}>Queued</span>}
-                              {state.status === 'uploading' && <span style={{ color: 'var(--accent)' }}>Uploading {state.progress}%</span>}
-                              {state.status === 'success' && <span style={{ color: 'var(--success)' }}>✓ Complete</span>}
-                              {state.status === 'failed' && <span style={{ color: 'var(--danger)' }}>⚠️ Failed</span>}
-                            </span>
-                          </div>
-
-                          {state.status === 'uploading' && (
-                            <div className="progress-bar-wrap">
-                              <div className="progress-bar-fill" style={{ width: `${state.progress}%` }} />
-                            </div>
-                          )}
-
-                          {state.error && (
-                            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', marginTop: 4 }}>
-                              {state.error}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                    {selectedDevices.map(id => (
+                      <TargetRow key={id} id={id} state={uploadStates[id]} onCancel={() => cancelOne(id)} />
+                    ))}
                   </div>
                 </div>
               ) : (
@@ -474,8 +554,16 @@ export default function Upload() {
                     <UploadCloud size={18} />
                     <span>Upload to {selectedDevices.length} Device{selectedDevices.length !== 1 ? 's' : ''}</span>
                   </button>
+                  {fileError && (
+                    <div className="alert alert-danger" role="alert" style={{ fontSize: 'var(--text-xs)' }}>
+                      <AlertCircle size={14} className="alert-icon" />
+                      <span>{fileError}</span>
+                    </div>
+                  )}
                   <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textAlign: 'center' }}>
-                    Files are transferred over LAN directly to each display unit.
+                    {cloud
+                      ? 'Files go through the N-Signage cloud relay (a temporary copy, deleted after delivery) to each display. Success is shown only after the display confirms it saved the file.'
+                      : 'Files are transferred over LAN directly to each display unit.'}
                   </p>
                 </div>
               )}
@@ -517,52 +605,20 @@ export default function Upload() {
                         : 'var(--warning)',
                     }}
                   >
-                    {overallSuccess && 'Deployment Complete'}
-                    {overallFailure && 'Deployment Failed'}
-                    {!overallSuccess && !overallFailure && 'Deployment Partially Complete'}
+                    {resultTitle}
                   </h2>
                   <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
                     {overallSuccess
-                      ? 'Media was transferred and is now active on all target displays.'
-                      : 'Review individual device results below.'}
+                      ? 'Every display confirmed it saved the file. It joins the playlist automatically.'
+                      : 'Review individual display results below.'}
                   </p>
                 </div>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginBottom: 'var(--space-5)' }}>
-                {selectedDevices.map(id => {
-                  const state = uploadStates[id] || {};
-                  const device = getDevices().find(c => c.id === id);
-
-                  return (
-                    <div
-                      key={id}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '10px 14px',
-                        background: 'var(--bg-card)',
-                        borderRadius: 'var(--radius-md)',
-                        border: '1px solid var(--border)',
-                      }}
-                    >
-                      <div>
-                        <div style={{ fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>
-                          {device?.deviceId}
-                        </div>
-                        {state.error && (
-                          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', marginTop: 2 }}>
-                            {state.error}
-                          </div>
-                        )}
-                      </div>
-                      <span className={`badge ${state.status === 'success' ? 'badge-success' : 'badge-danger'}`}>
-                        {state.status === 'success' ? 'Success' : 'Failed'}
-                      </span>
-                    </div>
-                  );
-                })}
+                {selectedDevices.map(id => (
+                  <TargetRow key={id} id={id} state={uploadStates[id]} onCancel={() => cancelOne(id)} onRetry={() => retryOne(id)} />
+                ))}
               </div>
 
               <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
@@ -632,6 +688,8 @@ export default function Upload() {
             </div>
           )}
 
+          {cloud && <RecentTransfers file={selectedFile} refreshKey={historyKey} />}
+
           {/* Workflow Guide */}
           <div className="card">
             <div
@@ -652,8 +710,8 @@ export default function Upload() {
                 'Search or filter target display units',
                 'Select specific displays or choose "Select All"',
                 'Choose your image or video media file',
-                'Click Upload & Display to start sequential transfer',
-                'Displays will switch to new media immediately upon receipt',
+                'Click Upload to start the transfer (one display at a time)',
+                'Each display adds the file to its playlist once it has saved it',
               ].map((text, idx) => (
                 <div key={idx} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
                   <div
@@ -703,7 +761,7 @@ export default function Upload() {
                   Images
                 </span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                  {['JPG', 'JPEG', 'PNG', 'GIF', 'WEBP'].map(ext => (
+                  {IMAGE_EXTS.map(e => e.toUpperCase()).map(ext => (
                     <span key={ext} className="badge badge-info" style={{ fontSize: '11px' }}>
                       {ext}
                     </span>
@@ -716,7 +774,7 @@ export default function Upload() {
                   Videos
                 </span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                  {['MP4', 'M4V', 'WEBM', 'MOV'].map(ext => (
+                  {VIDEO_EXTS.map(e => e.toUpperCase()).map(ext => (
                     <span key={ext} className="badge badge-info" style={{ fontSize: '11px' }}>
                       {ext}
                     </span>
@@ -727,6 +785,24 @@ export default function Upload() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function TargetRow({ id, state = { status: 'pending', progress: 0 }, onCancel, onRetry }) {
+  const device = getDevices().find(c => c.id === id);
+  return (
+    <div className="xfer-row">
+      <div className="xfer-head">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>
+            {device?.nickName || device?.deviceId || 'Removed device'}
+          </span>
+          {device?.ip && !isCloudDevice(device) && <span className="ip-chip" style={{ fontSize: '11px' }}>{device.ip}</span>}
+          {isCloudDevice(device) && <span className="badge badge-neutral" style={{ fontSize: 10 }}>via cloud relay</span>}
+        </div>
+      </div>
+      <TransferStatus state={state} onCancel={onCancel} onRetry={onRetry} />
     </div>
   );
 }

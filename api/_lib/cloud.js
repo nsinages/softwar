@@ -54,14 +54,37 @@ export function redis() {
 export const keys = {
   device: (id) => `ns:dev:${id}`,
   net: (netKey) => `ns:net:${netKey}`,
-  owners: (id) => `ns:owners:${id}`,             // set of browser ids that added this Pi
   commands: (id) => `ns:cmd:${id}`,
   results: (id) => `ns:res:${id}`,
-  blobs: (id) => `ns:blob:${id}`,
-  session: (hash) => `ns:sess:${hash}`,
-  browserDevices: (id) => `ns:browser-devs:${id}`,
   nonce: (n) => `ns:nonce:${n}`,
   rate: (bucket, id) => `ns:rl:${bucket}:${id}`,
+
+  // Legacy (anonymous browser sessions, before customer accounts). Read-only
+  // except for the one-time "link my old devices" flow; never deleted in bulk.
+  owners: (id) => `ns:owners:${id}`,             // set of browser ids that added this Pi
+  session: (hash) => `ns:sess:${hash}`,
+  browserDevices: (id) => `ns:browser-devs:${id}`,
+  blobs: (id) => `ns:blob:${id}`,                // cloud copies made by the old upload flow
+
+  // Customer accounts (new prefixes: never collide with the short-lived
+  // email-account build b979de3, which used ns:acct / ns:owner / ns:sess)
+  user: (id) => `ns:user:${id}`,
+  username: (name) => `ns:username:${name}`,
+  userSession: (hash) => `ns:usess:${hash}`,
+  userSessions: (id) => `ns:user-sess:${id}`,    // set of session hashes, for revocation
+  userDevices: (id) => `ns:user-devs:${id}`,     // hash deviceId -> { name, location, addedAt, via }
+  deviceOwner: (id) => `ns:dev-owner:${id}`,     // deviceId -> userId (exactly one owner)
+  loginFail: (name) => `ns:login-fail:${name}`,
+
+  // Pairing codes shown on the Pi screen
+  pairCode: (hash) => `ns:pair:${hash}`,
+  pairDevice: (id) => `ns:pair-dev:${id}`,
+
+  // Relay transfers (metadata only — the media bytes live in Blob, transiently)
+  transfer: (id) => `ns:xfer:${id}`,
+  transferIndex: () => 'ns:xfer-expiry',         // zset transferId -> expiresAt
+  userTransfers: (id) => `ns:user-xfers:${id}`,  // zset transferId -> createdAt
+  transferProgress: (id) => `ns:xfer-prog:${id}`,
 };
 
 export const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -74,6 +97,9 @@ export function safeEqual(a, b) {
 }
 
 export const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+
+/** Find Pi (same-network) claiming; set NSIGNAGE_NETWORK_CLAIM=off once all Pis show pairing codes. */
+export const networkClaimEnabled = () => String(process.env.NSIGNAGE_NETWORK_CLAIM || 'on').toLowerCase() !== 'off';
 
 // ---- Network matching ------------------------------------------------------
 
@@ -192,6 +218,37 @@ export function canReplaceSecret(device, owned, now = Date.now()) {
   return !device?.secretHash || (!owned && now - (device.lastSeen || 0) > STALE_SECRET_MS);
 }
 
+/** True when a customer account owns the Pi, or (legacy) any browser added it. */
+export async function isDeviceClaimed(deviceId) {
+  const r = redis();
+  if (await r.get(keys.deviceOwner(deviceId))) return true;
+  return (await r.scard(keys.owners(deviceId))) > 0;
+}
+
+function bearerSecret(req) {
+  const auth = String(req.headers.authorization || '');
+  const secret = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  if (secret.length < 32 || secret.length > 200) throw httpError(401, 'Missing device secret');
+  return secret;
+}
+
+/**
+ * Authenticate a Pi that has already registered (any Pi endpoint other than
+ * the first sync). Returns the device record.
+ */
+export async function authenticateDevice(req, deviceId) {
+  if (!DEVICE_ID_RX.test(deviceId || '')) throw httpError(400, 'Invalid device id');
+  const secret = bearerSecret(req);
+  const device = await getDevice(deviceId);
+  if (!device?.secretHash || !safeEqual(device.secretHash, sha256(secret))) {
+    console.warn('[N-SIGNAGE CLOUD] device auth failed', deviceId);
+    throw httpError(401, 'Device authentication failed', 'bad-device-secret');
+  }
+  return device;
+}
+
+export { bearerSecret };
+
 export function publicView(device, now = Date.now()) {
   return {
     deviceId: device.deviceId,
@@ -203,8 +260,14 @@ export function publicView(device, now = Date.now()) {
     status: isOnline(device, now) ? 'online' : 'offline',
     lastSeen: device.lastSeen || null,
     agentVersion: device.agentVersion || null,
+    capabilities: device.capabilities || [],
+    storage: device.storage || null,
     method: 'cloud',
   };
+}
+
+export function hasCapability(device, name) {
+  return Array.isArray(device?.capabilities) && device.capabilities.includes(name);
 }
 
 // ---- Commands --------------------------------------------------------------
@@ -214,9 +277,24 @@ export async function enqueueCommand(deviceId, command) {
   const r = redis();
   await r.rpush(keys.commands(deviceId), JSON.stringify(cmd));
   await r.expire(keys.commands(deviceId), COMMAND_TTL_S);
-  await r.hset(keys.results(deviceId), { [cmd.id]: JSON.stringify({ state: 'queued', at: Date.now() }) });
+  const entry = { state: 'queued', at: Date.now(), ...(cmd.transferId && { transferId: cmd.transferId }) };
+  await r.hset(keys.results(deviceId), { [cmd.id]: JSON.stringify(entry) });
   await r.expire(keys.results(deviceId), RESULT_TTL_S);
   return cmd;
+}
+
+/** Remove a queued command (e.g. a cancelled transfer). True if it was still queued. */
+export async function removeCommand(deviceId, commandId) {
+  const r = redis();
+  const list = (await r.lrange(keys.commands(deviceId), 0, -1)) || [];
+  let removed = false;
+  for (const raw of list) {
+    if (parse(raw).id === commandId) {
+      await r.lrem(keys.commands(deviceId), 1, typeof raw === 'string' ? raw : JSON.stringify(raw));
+      removed = true;
+    }
+  }
+  return removed;
 }
 
 export async function pendingCommands(deviceId) {
@@ -224,29 +302,55 @@ export async function pendingCommands(deviceId) {
   return list.map(parse);
 }
 
+const SHA256_RX = /^[a-f0-9]{64}$/;
+
+/**
+ * Record command results reported by a Pi. Returns the cleaned results, each
+ * with the transferId it belongs to (if any), so transfers can be updated.
+ */
 export async function completeCommands(deviceId, results) {
-  if (!Array.isArray(results) || results.length === 0) return;
+  if (!Array.isArray(results) || results.length === 0) return [];
   const r = redis();
+  const previous = (await r.hgetall(keys.results(deviceId))) || {};
   const done = new Set();
   const updates = {};
+  const cleaned = [];
   for (const res of results.slice(0, 50)) {
     if (!res || typeof res.id !== 'string' || res.id.length > 64) continue;
     done.add(res.id);
-    updates[res.id] = JSON.stringify({
-      state: res.ok ? 'done' : 'failed',
-      error: res.ok ? undefined : String(res.error || 'Failed on the Raspberry Pi').slice(0, 300),
+    const prev = previous[res.id] ? parse(previous[res.id]) : null;
+    const item = {
+      id: res.id,
+      ok: res.ok === true,
+      error: res.ok === true ? undefined : String(res.error || 'Failed on the Raspberry Pi').slice(0, 300),
+      reason: typeof res.reason === 'string' ? res.reason.slice(0, 40) : undefined,
       filename: typeof res.filename === 'string' ? res.filename.slice(0, 220) : undefined,
+      // Only reported by agent protocol 2 (checksum verification on the Pi)
+      sha256: typeof res.sha256 === 'string' && SHA256_RX.test(res.sha256.toLowerCase()) ? res.sha256.toLowerCase() : undefined,
+      size: Number.isSafeInteger(res.size) && res.size >= 0 ? res.size : undefined,
+      transferId: prev?.transferId,
+    };
+    cleaned.push(item);
+    updates[res.id] = JSON.stringify({
+      state: item.ok ? 'done' : 'failed',
+      error: item.error,
+      filename: item.filename,
+      transferId: item.transferId,
       at: Date.now(),
     });
   }
-  if (done.size === 0) return;
+  if (done.size === 0) return [];
   await r.hset(keys.results(deviceId), updates);
   const list = (await r.lrange(keys.commands(deviceId), 0, -1)) || [];
   for (const raw of list) {
     const cmd = parse(raw);
     if (done.has(cmd.id)) await r.lrem(keys.commands(deviceId), 1, typeof raw === 'string' ? raw : JSON.stringify(raw));
   }
+  return cleaned;
 }
+
+// Capabilities a Pi agent may announce (protocol 2+). Unknown values are dropped.
+export const KNOWN_CAPABILITIES = ['sha256', 'range-resume', 'private-blob', 'pairing', 'progress', 'storage'];
 
 // ---- Validation of what a Pi reports ----------------------------------------
 
@@ -268,7 +372,16 @@ export function cleanReport(body) {
     : [];
   const currentMedia = typeof body.currentMedia === 'string' && MEDIA_NAME_RX.test(body.currentMedia) ? body.currentMedia : null;
   const agentVersion = typeof body.agentVersion === 'string' ? body.agentVersion.slice(0, 20) : null;
-  return { username, hostname, localIp, port, media, currentMedia, agentVersion };
+  // Protocol 2 fields (optional; agent 1.0 sends none of them)
+  const protocol = Number.isInteger(body.protocol) && body.protocol > 0 && body.protocol < 100 ? body.protocol : 1;
+  const capabilities = Array.isArray(body.capabilities)
+    ? [...new Set(body.capabilities.filter((c) => KNOWN_CAPABILITIES.includes(c)))]
+    : [];
+  const s = body.storage;
+  const storage = s && Number.isSafeInteger(s.freeBytes) && s.freeBytes >= 0 && Number.isSafeInteger(s.totalBytes) && s.totalBytes > 0
+    ? { freeBytes: s.freeBytes, totalBytes: s.totalBytes }
+    : null;
+  return { username, hostname, localIp, port, media, currentMedia, agentVersion, protocol, capabilities, storage };
 }
 
 export const NET_TTL_S = NET_INDEX_TTL_S;

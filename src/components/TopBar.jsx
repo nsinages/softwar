@@ -14,6 +14,7 @@ const PAGE_TITLES = {
 };
 
 export default function TopBar({
+  username,
   onlineCount = 0,
   totalCount = 0,
   onMobileMenuToggle,
@@ -70,7 +71,7 @@ export default function TopBar({
         {/* User Badge */}
         <div className="topbar-user-badge">
           <User size={13} className="user-badge-icon" />
-          <span className="user-badge-label">Admin</span>
+          <span className="user-badge-label">{username || 'Admin'}</span>
         </div>
       </div>
     </header>

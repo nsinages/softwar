@@ -1,5 +1,12 @@
 # N-Signage — hosted website, Find Pi and Add Device
 
+> **Updated in Phase 2:** the hosted website now has customer accounts
+> (username + password), pairing codes, and hardened relay transfers. The
+> "no login / per-browser" parts below describe the previous version; see
+> [ACCOUNTS-AND-TRANSFERS.md](ACCOUNTS-AND-TRANSFERS.md) for the current
+> behaviour. Find Pi itself (same public network) is unchanged, but it now
+> adds the display to the logged-in account.
+
 How customers find and add a Raspberry Pi from https://software.nsinages.in,
 without installing anything on their phone or computer and without logging in.
 

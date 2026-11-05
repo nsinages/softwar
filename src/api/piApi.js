@@ -6,8 +6,10 @@
 import axios from 'axios';
 import { getSettings } from '../data/store';
 import {
-  isCloudDevice, cloudStatus, cloudMedia, cloudUpload, cloudDelete,
+  isCloudDevice, cloudStatus, cloudMedia, cloudDelete,
 } from './cloudApi';
+import { sendFileViaRelay } from './transferApi';
+import { MEDIA_TYPES, IMAGE_EXTS, VIDEO_EXTS, checkMediaFile } from '../../shared/mediaTypes';
 
 const STATUS_TIMEOUT = 5000;    // 5s for status checks
 const UPLOAD_TIMEOUT = 600000;  // 10min for uploads (large videos over Wi-Fi)
@@ -18,11 +20,10 @@ const DEFAULT_TIMEOUT = 10000;  // 10s for other calls
 // only when the site is hosted elsewhere and every Pi has CORS enabled.
 const PI_DIRECT = import.meta.env.VITE_PI_DIRECT === 'true';
 
-export const ALLOWED_EXT = /\.(jpg|jpeg|png|gif|webp|mp4|m4v|webm|mov)$/i;
-export const ALLOWED_TYPES = [
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-  'video/mp4', 'video/x-m4v', 'video/webm', 'video/quicktime',
-];
+// Same list as the Pi (N-Signage/app/config.py) — see shared/mediaTypes.js
+export const ALLOWED_EXT = new RegExp(`\\.(${Object.keys(MEDIA_TYPES).join('|')})$`, 'i');
+export const ALLOWED_TYPES = [...new Set(Object.values(MEDIA_TYPES).map((t) => t.mime))];
+export const ALLOWED_LABEL = [...IMAGE_EXTS, ...VIDEO_EXTS].map((e) => e.toUpperCase()).join(', ');
 
 /** Port of a device, falling back to the port configured in Settings. */
 export function devicePort(device) {
@@ -145,14 +146,16 @@ export async function getPiMedia(device) {
  * @returns {Promise<{ok: boolean, data?: object, error?: string}>}
  */
 export async function uploadMedia(device, file, onProgress = null) {
-  if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXT.test(file.name)) {
-    return {
-      ok: false,
-      error: `Unsupported file type: "${file.type || file.name}". Allowed: JPG, PNG, GIF, WEBP, MP4, M4V, WEBM, MOV`,
-    };
-  }
+  const typeError = checkMediaFile(file.name, file.type);
+  if (typeError) return { ok: false, error: typeError };
 
-  if (isCloudDevice(device)) return cloudUpload(device, file, onProgress);
+  // Cloud devices: relay transfer; ok only once the Pi confirmed it saved the file
+  if (isCloudDevice(device)) {
+    const r = await sendFileViaRelay(device, file, {
+      onUpdate: (u) => { if (u.phase === 'uploading' && u.total) onProgress?.(Math.round((u.loaded / u.total) * 100)); },
+    });
+    return r.ok ? { ok: true, data: { filename: r.transfer?.savedAs } } : { ok: false, error: r.error || 'Transfer not completed yet', transfer: r };
+  }
 
   const formData = new FormData();
   formData.append('file', file);

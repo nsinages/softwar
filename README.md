@@ -24,27 +24,32 @@ Device list and settings are stored in each browser's `localStorage`.
 A website hosted on the internet (Vercel) can never connect to a Pi on a
 customer's Wi-Fi, and browsers cannot do UDP/mDNS discovery. When the site is
 opened from a public domain it switches to **cloud mode** automatically:
-every Pi connects *out* to the website, and "Find Pi" lists the Pis that
-synced from the customer's own network (same public IP). There is no login;
-each browser gets an anonymous session cookie automatically.
+every Pi connects *out* to the website, and customers manage their displays
+from any network after logging in.
 
 ```
-Pi (cloud_agent.py) ──every 5 s──►  POST /api/pi/sync   ◄── queued commands (download / delete)
-Browser ──► /api/auth     anonymous browser session (HttpOnly cookie, no login)
-        ──► /api/find     Pis on the SAME Wi-Fi as the browser (no username needed)
-        ──► /api/devices  Add Device (single-use nonce) / rename / remove — saved per browser
-        ──► /api/device   status, media list, delete; uploads go to Vercel Blob, the Pi downloads them
+Pi (cloud_agent.py) ──every 2–5 s──►  POST /api/pi/sync   ◄── queued commands (download / delete)
+Browser ──► /api/auth      username + password accounts (no email), recovery keys
+        ──► /api/devices   Add Device: same Wi-Fi (Find Pi) or pairing code; rename / remove
+        ──► /api/find      Pis on the SAME network as the browser
+        ──► /api/transfer  relay transfers: checksum, cancel/retry, copy deleted after the Pi confirms
+        ──► /api/device    status, media list, delete
 ```
 
-A Pi can only be **added** from a phone or computer on the same Wi-Fi as the
-Pi. After that it can be managed from anywhere in that browser.
+Media goes browser → cloud relay (temporary copy) → Pi. It is a relay, not
+peer-to-peer, and it is stored only on the Pi.
 
-**Setup, Pi install, customer/staff instructions, security and limitations:**
-see [docs/CLOUD-DISCOVERY.md](docs/CLOUD-DISCOVERY.md).
+- Accounts, pairing, transfers, staff recovery, env vars, deploy and rollback:
+  [docs/ACCOUNTS-AND-TRANSFERS.md](docs/ACCOUNTS-AND-TRANSFERS.md)
+- What the next Pi software update must implement:
+  [docs/PI-AGENT-V2-CONTRACT.md](docs/PI-AGENT-V2-CONTRACT.md)
+- Find Pi and installing the cloud agent on a Pi:
+  [docs/CLOUD-DISCOVERY.md](docs/CLOUD-DISCOVERY.md)
 
 Quick version:
 
-1. Vercel → Storage: connect **Upstash Redis** and a **public Blob** store, redeploy.
+1. Vercel → Storage: connect **Upstash Redis** and a **public Blob** store; add a
+   `CRON_SECRET` environment variable; redeploy.
    `curl https://software.nsinages.in/api/health` → `"ok":true`.
 2. On each Pi, in the N-Signage folder: `sudo ./install-cloud-agent.sh`
    (detects the Linux user and folder; `--uninstall` to roll back).
@@ -89,6 +94,7 @@ Without a key, anyone on the network can upload or delete media on the Pis
 npm install
 npm run dev        # http://localhost:5173 (same proxy + discovery as production)
 npm run lint
+npm test           # API, Pi agent 1.0 compatibility (needs Python 3), checksum utils
 ```
 
 ## Security notes
@@ -97,6 +103,6 @@ npm run lint
   `169.254.x.x` or public internet) and only to `/api/*` and `/media/*`.
 - The production server sends CSP, `X-Frame-Options: DENY`, `nosniff` and
   `Referrer-Policy` headers.
-- The dashboard itself has no login. Expose it only on a trusted LAN — never
-  directly to the internet. Put it behind a VPN or an authenticating reverse
+- In LAN mode the dashboard has no login. Expose it only on a trusted LAN — never
+  directly to the internet (the hosted cloud mode has customer accounts). Put it behind a VPN or an authenticating reverse
   proxy if remote access is needed.

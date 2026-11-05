@@ -19,7 +19,8 @@ import {
 import { getDevices, saveDevice, updateDevice, deleteDevice, DEVICES_CHANGED_EVENT } from '../data/store';
 import { getPiStatus } from '../api/piApi';
 import { isCloudMode, cloudRename, cloudRemove, syncCloudDevices } from '../api/cloudApi';
-import CloudFindPi from '../components/CloudFindPi';
+import CloudAddDevice from '../components/CloudAddDevice';
+import LegacyDevicesPanel from '../components/LegacyDevicesPanel';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import PiDiscoveryPanel from '../components/PiDiscoveryPanel';
@@ -61,7 +62,7 @@ export default function Devices() {
   const cloud = isCloudMode();
   const reload = () => setDevices(getDevices());
 
-  // Cloud mode: the list is the Pis added in this browser (kept in the cloud)
+  // Cloud mode: the list is the Pis registered to the customer account
   useEffect(() => {
     const onChange = () => setDevices(getDevices());
     window.addEventListener(DEVICES_CHANGED_EVENT, onChange);
@@ -323,6 +324,8 @@ export default function Devices() {
           </button>
         </div>
       )}
+
+      {cloud && <LegacyDevicesPanel onLinked={reload} />}
 
       {/* Filter and Stats Toolbar */}
       <div
@@ -605,7 +608,7 @@ export default function Devices() {
             <div className="modal-header">
               <div className="modal-title">
                 <Tv size={18} style={{ color: 'var(--accent)' }} />
-                <span>{editId ? 'Edit Device' : cloud ? 'Find Pi & Add Device' : 'Add New Device'}</span>
+                <span>{editId ? 'Edit Device' : 'Add Device'}</span>
               </div>
               <button
                 className="btn btn-ghost btn-icon btn-sm"
@@ -617,11 +620,11 @@ export default function Devices() {
             </div>
 
             {cloud && !editId ? (
-              <CloudFindPi
+              <CloudAddDevice
                 onAdded={saved => {
                   reload();
                   closeForm();
-                  setSuccessMsg(`${saved.nickName || saved.hostname || saved.deviceId} was added. It stays on this list in this browser and can be managed from any network.`);
+                  setSuccessMsg(`${saved.nickName || saved.hostname || saved.deviceId} was added to your account. You can now manage it from any network.`);
                 }}
               />
             ) : cloud ? (
@@ -752,7 +755,7 @@ export default function Devices() {
             Are you sure you want to remove <strong>{deleteTarget?.deviceId}</strong>?
             <br /><br />
             {cloud
-              ? 'This removes the display from this browser. Media already on the Raspberry Pi stays there and keeps playing. You can add it again later with Find Pi.'
+              ? 'This removes the display from your account and cancels its unfinished transfers. Media already on the Raspberry Pi stays there and keeps playing. You can add it again later.'
               : 'This will remove the display from this management dashboard. The physical Raspberry Pi and its stored files will remain unaffected.'}
           </span>
         }

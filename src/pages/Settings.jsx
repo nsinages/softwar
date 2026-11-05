@@ -13,8 +13,10 @@ import {
 } from 'lucide-react';
 import { getSettings, saveSettings, clearAllDevices, SETTINGS_LIMITS } from '../data/store';
 import { isCloudMode } from '../api/cloudApi';
+import AccountSettings from '../components/AccountSettings';
 
-export default function Settings() {
+export default function Settings({ user }) {
+  const cloud = isCloudMode();
   const [settings, setSettings] = useState(() => getSettings());
   const [saved, setSaved] = useState(false);
   const [resetSaved, setResetSaved] = useState(false);
@@ -62,6 +64,8 @@ export default function Settings() {
       </div>
 
       <div style={{ maxWidth: 640, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+        {cloud && user && <AccountSettings user={user} />}
+
         {/* Network Settings */}
         <div className="card">
           <div className="card-header">
@@ -165,10 +169,10 @@ export default function Settings() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
             {[
               ['Platform', 'N-Signage Digital Signage System'],
-              ['Version', '4.6.0 (Cloud Find Pi)'],
+              ['Version', '5.0.0 (Accounts & secure relay transfers)'],
               ['Architecture', 'Decentralized Edge Nodes + Central Management Console'],
-              ['Communication Protocol', 'Direct REST API over LAN / Wi-Fi'],
-              ['Device Storage', 'Client-side LocalStorage + Raspberry Pi FS'],
+              ['Communication Protocol', cloud ? 'Cloud relay over HTTPS (temporary copy, deleted after delivery). Media is stored on the Raspberry Pi.' : 'Direct REST API over LAN / Wi-Fi'],
+              ['Device Storage', cloud ? 'Customer account (cloud) + Raspberry Pi FS' : 'Client-side LocalStorage + Raspberry Pi FS'],
             ].map(([label, value]) => (
               <div
                 key={label}
@@ -191,7 +195,7 @@ export default function Settings() {
         </div>
 
         {/* Reset Database Section (LAN mode only: in cloud mode devices are kept in the cloud) */}
-        {!isCloudMode() && (
+        {!cloud && (
         <div className="card" style={{ borderColor: 'rgba(239, 68, 68, 0.25)' }}>
           <div className="card-header">
             <div className="card-title" style={{ color: 'var(--danger)' }}>

@@ -1,7 +1,7 @@
 // =============================================
 // N Signage — App Root Shell
 // =============================================
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import { ArrowLeft, Compass, Loader2, AlertTriangle, RotateCw } from 'lucide-react';
 import Sidebar from './components/Sidebar';
@@ -11,66 +11,80 @@ import Devices from './pages/Devices';
 import Media from './pages/Media';
 import Upload from './pages/Upload';
 import Settings from './pages/Settings';
+import Login from './pages/Login';
 import { getDevices, replaceDevices, DEVICES_CHANGED_EVENT } from './data/store';
 import { usePiStatus } from './hooks/usePiStatus';
-import { isCloudMode, syncCloudDevices, SESSION_LOST_EVENT } from './api/cloudApi';
-import { ensureSession } from './api/authApi';
+import { isCloudMode, syncCloudDevices } from './api/cloudApi';
+import { getMe, logout, LOGGED_OUT_EVENT } from './api/authApi';
 
 /**
- * Hosted website (cloud mode): no login. The browser gets an anonymous
- * session automatically, and the Raspberry Pis added in this browser are
- * loaded before the dashboard renders.
- * LAN mode (localhost / npm start) works exactly as before.
+ * Hosted website (cloud mode): customers log in with a username and password;
+ * their Raspberry Pis are loaded from their account before the dashboard renders.
+ * LAN mode (localhost / npm start) needs no login and works exactly as before.
  */
 export default function App() {
   const cloud = isCloudMode();
-  const [boot, setBoot] = useState(cloud ? { state: 'starting' } : { state: 'ready' });
-  const sessionOk = useRef(false);   // true once the cloud gave this browser a session
-  const lastRecovery = useRef(0);
+  const [auth, setAuth] = useState(cloud ? { state: 'checking' } : { state: 'lan' });
 
-  const start = useCallback(async (initial = false) => {
-    if (!initial) setBoot({ state: 'starting' });
-    const session = await ensureSession();
-    sessionOk.current = session.ok;
-    if (!session.ok) {
-      // Cloud unavailable: still show the dashboard, with the reason as a banner
-      replaceDevices([]);
-      setBoot({ state: 'ready', error: session.error });
-      return;
-    }
+  const enter = useCallback(async (user) => {
+    setAuth({ state: 'loading', user });
     const res = await syncCloudDevices();
-    if (!res.ok) replaceDevices([]); // never show a stale cached list
-    setBoot({ state: 'ready', error: res.ok ? '' : res.error });
+    if (!res.ok) replaceDevices([]); // never show a stale or previous user's list
+    setAuth({ state: 'in', user, error: res.ok ? '' : res.error });
   }, []);
+
+  const check = useCallback(async (initial = false) => {
+    if (!initial) setAuth({ state: 'checking' });
+    const me = await getMe();
+    if (me.ok) enter(me.user);
+    else if (me.loggedOut) { replaceDevices([]); setAuth({ state: 'out' }); }
+    else setAuth({ state: 'error', error: me.error });
+  }, [enter]);
 
   useEffect(() => {
     if (!cloud) return undefined;
-    start(true);
-    // Session cookie gone (cleared or expired) after it had worked: get a new
-    // one silently — at most once per 30 s, and never when the cloud itself is
-    // down (that would loop: no session → retry → no session …).
-    const onLost = () => {
-      const now = Date.now();
-      if (!sessionOk.current || now - lastRecovery.current < 30000) return;
-      lastRecovery.current = now;
-      sessionOk.current = false;
-      start();
-    };
-    window.addEventListener(SESSION_LOST_EVENT, onLost);
-    return () => window.removeEventListener(SESSION_LOST_EVENT, onLost);
-  }, [cloud, start]);
+    check(true);
+    // Session expired or revoked (logout elsewhere, password changed): back to login
+    const onLoggedOut = () => { replaceDevices([]); setAuth({ state: 'out', notice: 'Your session ended. Please log in again.' }); };
+    window.addEventListener(LOGGED_OUT_EVENT, onLoggedOut);
+    return () => window.removeEventListener(LOGGED_OUT_EVENT, onLoggedOut);
+  }, [cloud, check]);
 
-  if (boot.state === 'starting') {
+  async function handleLogout() {
+    await logout();
+    replaceDevices([]);
+    setAuth({ state: 'out' });
+  }
+
+  if (auth.state === 'out') return <Login onLoggedIn={enter} notice={auth.notice} />;
+  if (auth.state === 'checking' || auth.state === 'loading') {
     return (
       <div className="boot-screen">
         <Loader2 size={22} style={{ animation: 'spin 0.8s linear infinite', color: 'var(--accent)' }} />
       </div>
     );
   }
-  return <Shell loadError={boot.error} onRetry={cloud ? () => start() : undefined} />;
+  if (auth.state === 'error') {
+    return (
+      <div className="boot-screen">
+        <div className="card boot-card">
+          <div className="alert alert-danger"><AlertTriangle size={15} className="alert-icon" /><span>{auth.error}</span></div>
+          <button className="btn btn-secondary" onClick={() => check()}><RotateCw size={14} /> Try again</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <Shell
+      user={auth.user}
+      onLogout={cloud ? handleLogout : undefined}
+      loadError={auth.error}
+      onRetry={cloud ? () => enter(auth.user) : undefined}
+    />
+  );
 }
 
-function Shell({ loadError, onRetry }) {
+function Shell({ user, onLogout, loadError, onRetry }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const { statusMap } = usePiStatus();
@@ -99,9 +113,12 @@ function Shell({ loadError, onRetry }) {
           onToggle={() => setSidebarCollapsed(c => !c)}
           mobileOpen={mobileSidebarOpen}
           onMobileClose={() => setMobileSidebarOpen(false)}
+          user={user}
+          onLogout={onLogout}
         />
         <div className="main-content">
           <TopBar
+            username={user?.username}
             onlineCount={onlineCount}
             totalCount={devices.length}
             onMobileMenuToggle={() => setMobileSidebarOpen(o => !o)}
@@ -123,7 +140,7 @@ function Shell({ loadError, onRetry }) {
               <Route path="/devices" element={<Devices />} />
               <Route path="/media" element={<Media />} />
               <Route path="/upload" element={<Upload />} />
-              <Route path="/settings" element={<Settings />} />
+              <Route path="/settings" element={<Settings user={user} />} />
               <Route
                 path="*"
                 element={

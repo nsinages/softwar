@@ -1,37 +1,22 @@
 // /api/device?deviceId=<id>&action=<action> — manage a Pi through the cloud.
-// Every action needs the browser session cookie of a browser that added the Pi.
+// Every action needs the logged-in customer account that owns the Pi.
 //
-//   GET  action=status            last state reported by the Pi
-//   GET  action=media             media files on the Pi (+ preview URLs)
-//   POST action=command           { type: 'delete', filename } |
-//                                 { type: 'download', url, filename, size }
+//   GET  action=status            last state reported by the Pi (heartbeat every ~5 s)
+//   GET  action=media             media files the Pi reports it has (+ legacy preview URLs)
+//   POST action=command           { type: 'delete', filename }
 //   GET  action=result&id=<cmd>   progress of a queued command
-//   POST action=upload            Vercel Blob client-upload token exchange
-import { handleUpload } from '@vercel/blob/client';
-import { del } from '@vercel/blob';
+//
+// Uploads moved to /api/transfer (checksums, cancel/retry, relay copy deleted
+// after delivery). The old "download any blob URL" command was removed.
 import {
   redis, keys, send, handleError, httpError, readJsonBody, requireSameOrigin,
-  isOnline, enqueueCommand, pendingCommands, parse, MEDIA_NAME_RX, DEVICE_ID_RX,
+  isOnline, enqueueCommand, pendingCommands, parse, MEDIA_NAME_RX,
 } from './_lib/cloud.js';
 import { requireOwnedDevice } from './_lib/auth.js';
+import { safeDelete } from './_lib/blobStore.js';
 
-const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
-const ALLOWED_CONTENT_TYPES = [
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-  'video/mp4', 'video/x-m4v', 'video/webm', 'video/quicktime',
-];
-const BLOB_HOST_RX = /^[a-z0-9-]+\.public\.blob\.vercel-storage\.com$/i;
-
-function isBlobUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.protocol === 'https:' && BLOB_HOST_RX.test(u.hostname);
-  } catch {
-    return false;
-  }
-}
-
-// filename on the Pi → blob URL, for files that were uploaded through the cloud
+// filename on the Pi → blob URL, for files uploaded by the OLD cloud flow
+// (before transfers). New transfers keep no cloud copy once delivered.
 async function blobIndex(deviceId) {
   const r = redis();
   const [blobs, results] = await Promise.all([
@@ -64,6 +49,9 @@ async function statusAction(device) {
       current_media: device.currentMedia || undefined,
       media_count: device.media?.length ?? 0,
       agent_version: device.agentVersion,
+      agent_protocol: device.protocol || 1,
+      capabilities: device.capabilities || [],
+      storage: device.storage || null,
     },
   };
 }
@@ -72,7 +60,7 @@ async function mediaAction(device) {
   const index = await blobIndex(device.deviceId);
   const pending = (await pendingCommands(device.deviceId))
     .filter((c) => c.type === 'download')
-    .map((c) => ({ name: c.filename, pending: true, size: c.size || null }));
+    .map((c) => ({ name: c.filename, pending: true, size: c.size || null, transferId: c.transferId || null }));
   const media = (device.media || []).map((m) => ({ ...m, url: index[m.name]?.url || null }));
   return { ok: true, online: isOnline(device), media, pending };
 }
@@ -87,18 +75,8 @@ async function commandAction(device, body) {
     const entry = (await blobIndex(deviceId))[filename];
     if (entry) {
       await redis().hdel(keys.blobs(deviceId), entry.cmdId);
-      try { await del(entry.url); } catch (err) { console.warn('[N-SIGNAGE CLOUD] blob delete failed', err.message); }
+      await safeDelete(entry.url);
     }
-    return { ok: true, command: cmd };
-  }
-  if (body.type === 'download') {
-    const filename = String(body.filename || '');
-    const url = String(body.url || '');
-    if (!MEDIA_NAME_RX.test(filename)) throw httpError(400, 'Unsupported file name or type');
-    if (!isBlobUrl(url)) throw httpError(400, 'Invalid upload URL');
-    const size = Number.isFinite(body.size) && body.size > 0 ? Math.min(body.size, MAX_UPLOAD_BYTES) : null;
-    const cmd = await enqueueCommand(deviceId, { type: 'download', url, filename, size });
-    await redis().hset(keys.blobs(deviceId), { [cmd.id]: JSON.stringify({ url, filename }) });
     return { ok: true, command: cmd };
   }
   throw httpError(400, 'Unknown command');
@@ -111,39 +89,11 @@ async function resultAction(device, id) {
   return { ok: true, online: isOnline(device), result: parse(raw) };
 }
 
-async function uploadAction(req, body) {
-  return handleUpload({
-    request: req,
-    body,
-    onBeforeGenerateToken: async (pathname, clientPayload) => {
-      let payload;
-      try { payload = JSON.parse(clientPayload || '{}'); } catch { throw httpError(400, 'Invalid upload payload'); }
-      const deviceId = String(payload.deviceId || '');
-      if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
-      await requireOwnedDevice(req, deviceId); // session cookie must own this Pi
-      if (!pathname.startsWith(`media/${deviceId}/`)) throw httpError(400, 'Invalid upload path');
-      return {
-        allowedContentTypes: ALLOWED_CONTENT_TYPES,
-        maximumSizeInBytes: MAX_UPLOAD_BYTES,
-        addRandomSuffix: true,
-      };
-    },
-  });
-}
-
 export default async function handler(req, res) {
   try {
     const action = String(req.query?.action || '');
     if (action === 'upload') {
-      if (req.method !== 'POST') throw httpError(405, 'Method not allowed');
-      const body = readJsonBody(req);
-      if (body?.type !== 'blob.generate-client-token') throw httpError(400, 'Unsupported upload event');
-      requireSameOrigin(req);
-      if (!process.env.BLOB_READ_WRITE_TOKEN) {
-        throw httpError(503, 'Media storage is not configured. Connect a Vercel Blob store to this project.', 'blob-not-configured');
-      }
-      send(res, 200, await uploadAction(req, body));
-      return;
+      throw httpError(410, 'Uploads now use /api/transfer. Please reload the page.', 'use-transfer-api');
     }
 
     const deviceId = String(req.query?.deviceId || '');
