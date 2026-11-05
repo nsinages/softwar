@@ -1,5 +1,5 @@
 // Backward compatibility: the unmodified Pi agent 1.0 (cloud_agent.py) syncs
-// with the new API, receives a relay transfer, saves the file, and the website
+// with the new API (Supabase/PostgreSQL storage), receives a relay transfer, saves the file, and the website
 // marks it completed (saved, not checksum-verified) and deletes the relay copy.
 // Needs Python 3 on PATH ("python" or "python3"). Run: npm test
 import { test, before, after } from 'node:test';
@@ -13,13 +13,14 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setupEnv, memoryBlob, Client } from './helpers/harness.js';
 
 const IP = '198.51.100.77';
-let upstash; let server; let baseUrl; let blob; let work;
+let database; let server; let db; let baseUrl; let blob; let work;
 let auth; let devices; let find; let sync; let transfer; let blobStore;
 
 const python = ['python3', 'python'].find((p) => spawnSync(p, ['--version']).status === 0);
 
 before(async () => {
-  upstash = await setupEnv();
+  database = await setupEnv();
+  db = await import('../api/_lib/db.js');
   ({ default: auth } = await import('../api/auth.js'));
   ({ default: devices } = await import('../api/devices.js'));
   ({ default: find } = await import('../api/find.js'));
@@ -46,11 +47,24 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
 
-after(() => {
+after(async () => {
   server?.close();
-  upstash?.close();
+  if (database?.external) {
+    await db.asSystem(async (t) => {
+      const [u] = await t`select id from nsignage.users where username = 'legacy.owner'`;
+      if (u) {
+        await t`delete from nsignage.transfers where user_id = ${u.id}`;
+        await t`update nsignage.devices set owner_id = null, added_at = null, added_via = null where owner_id = ${u.id}`;
+        await t`delete from nsignage.devices where id = ${agentDeviceId || ''}`;
+        await t`delete from nsignage.users where id = ${u.id}`;
+      }
+    });
+  }
+  await db?.closeDb();
+  await database?.close();
   if (work) fs.rmSync(work, { recursive: true, force: true });
 });
+let agentDeviceId = null;
 
 const waitFor = async (fn, ms = 20000) => {
   const until = Date.now() + ms;
@@ -82,6 +96,7 @@ test('unmodified agent 1.0: find, claim, relay transfer, completion, copy delete
   try {
     const start = await waitFor(() => events.find((e) => e.event === 'start'));
     assert.equal(start.agentVersion, '1.0');
+    agentDeviceId = start.deviceId;
 
     const owner = new Client('owner', IP);
     const reg = await owner.call(auth, { method: 'POST', query: { action: 'register' }, body: { username: 'legacy.owner', password: 'legacy owner password' } });

@@ -3,25 +3,27 @@
 //
 //   browser ──HTTPS──► Vercel Blob (transient copy) ──HTTPS──► Pi (cloud_agent)
 //
-// Life of a transfer (metadata in Redis, bytes only in Blob):
+// Metadata lives in Supabase (nsignage.transfers, nsignage.device_commands);
+// the media bytes only ever exist in the temporary Blob copy and on the Pi.
 //
 //   created ──commit──► queued ──Pi reports ok──► completed   (copy deleted)
 //      │                  │  └──Pi reports error──► failed ──retry──► queued
 //      │                  │                           └──(copy gone)──► created
 //      └──────────────────┴──cancel──► cancelled (copy deleted)
-//   any non-final state past expiresAt ──► expired (copy deleted)
+//   any non-final state past expires_at ──► expired (copy deleted)
 //
 // "completed" is only set when the Pi reports that it saved the file.
 // verified=true additionally needs the Pi to report the SHA-256 it computed
 // (agent protocol 2); agent 1.0 only confirms the save (verified=false).
 //
-// Kept separate from the HTTP layer so a future WebRTC/TURN transport can
-// reuse the same transfer records, states and Pi result handling.
+// Blob copies are deleted AFTER the database transaction commits
+// (deleteRelayCopies); if that fails, the record keeps its blob_url and the
+// cleanup cron retries. Kept separate from the HTTP layer so a future
+// WebRTC/TURN transport can reuse the same records and Pi result handling.
 // =============================================
 import crypto from 'node:crypto';
-import {
-  redis, keys, httpError, parse, enqueueCommand, removeCommand, hasCapability,
-} from './cloud.js';
+import { httpError, hasCapability } from './cloud.js';
+import { asSystem, ms } from './db.js';
 import { blobStore, blobAccess, blobPathname, safeDelete } from './blobStore.js';
 import {
   mediaTypeOf, extOf, safeMediaName, contentMatches, DEFAULT_MAX_UPLOAD_MB,
@@ -29,99 +31,112 @@ import {
 
 const MiB = 1024 * 1024;
 export const MAX_UPLOAD_BYTES = Math.max(1, Number(process.env.NSIGNAGE_MAX_UPLOAD_MB) || DEFAULT_MAX_UPLOAD_MB) * MiB;
-// Agent 1.0 refuses files over 500 MB, whatever the website allows
-const AGENT_V1_MAX_BYTES = 500 * MiB;
-export const TRANSFER_TTL_MS = Math.max(1, Number(process.env.NSIGNAGE_TRANSFER_TTL_HOURS) || 48) * 3600 * 1000;
-const RECORD_TTL_S = 14 * 24 * 3600;      // history kept 14 days (metadata only)
-const UPLOAD_TOKEN_MS = 6 * 3600 * 1000;  // long enough for a large video on slow mobile data
-const PRESIGN_MS = 30 * 60 * 1000;        // private mode: each Pi download URL is valid 30 min
+const AGENT_V1_MAX_BYTES = 500 * MiB;      // agent 1.0 refuses files over 500 MB
+export const TRANSFER_TTL_S = Math.max(1, Number(process.env.NSIGNAGE_TRANSFER_TTL_HOURS) || 48) * 3600;
+const UPLOAD_TOKEN_MS = 6 * 3600 * 1000;   // long enough for a large video on slow mobile data
+const PRESIGN_MS = 30 * 60 * 1000;         // private mode: each Pi download URL is valid 30 min
 const MAX_ATTEMPTS = 5;
 const MAX_ACTIVE_PER_USER = 50;
-const HISTORY_PER_USER = 100;
-const STORAGE_MARGIN = 200 * MiB;         // leave room on the SD card
+const STORAGE_MARGIN = 200 * MiB;
 
-const TRANSFER_ID_RX = /^[A-Za-z0-9_-]{22}$/;   // 128 random bits, base64url
+const TRANSFER_ID_RX = /^[A-Za-z0-9_-]{22}$/;
 const SHA256_RX = /^[a-f0-9]{64}$/;
-const FINAL = new Set(['completed', 'cancelled', 'expired']);
-export const isFinal = (t) => FINAL.has(t.state);
+export const FINAL_STATES = ['completed', 'cancelled', 'expired'];
+export const isFinal = (tr) => FINAL_STATES.includes(tr.state);
 
 const newTransferId = () => crypto.randomBytes(16).toString('base64url');
-const pathPrefix = (t) => `transfers/${t.deviceId}/${t.id}/`;
+const pathPrefix = (tr) => `transfers/${tr.deviceId}/${tr.id}/`;
+export const uploadPathname = (tr) => `${pathPrefix(tr)}${tr.filename}`;
 
 // ---- Records -------------------------------------------------------------------
 
-export async function getTransfer(id) {
-  if (!TRANSFER_ID_RX.test(id || '')) return null;
-  return (await redis().get(keys.transfer(id))) || null;
-}
-
-async function saveTransfer(t) {
-  t.updatedAt = Date.now();
-  await redis().set(keys.transfer(t.id), t, { ex: RECORD_TTL_S });
-  return t;
-}
-
-/** What the browser may see: never the blob URL, the owner id or any token. */
-export function transferView(t, receivedBytes = null) {
+export function transferFromRow(r) {
+  if (!r) return null;
   return {
-    id: t.id,
-    deviceId: t.deviceId,
-    filename: t.filename,
-    size: t.size,
-    sha256: t.sha256,
-    contentType: t.contentType,
-    kind: t.kind,
-    state: t.state,
-    relay: 'cloud',               // relay-based transfer, not peer-to-peer
-    access: t.access,
-    createdAt: t.createdAt,
-    updatedAt: t.updatedAt,
-    expiresAt: t.expiresAt,
-    attempts: t.attempts || 0,
-    error: t.error || null,
-    reason: t.reason || null,
-    savedAs: t.savedAs || null,
-    verified: Boolean(t.verified),
-    verification: t.verification || null,
-    completedAt: t.completedAt || null,
-    cloudCopy: Boolean(t.blobUrl),
-    ...(receivedBytes !== null && { receivedBytes }),
+    id: r.id,
+    userId: r.user_id,
+    deviceId: r.device_id,
+    filename: r.filename,
+    originalName: r.original_name,
+    size: r.size_bytes,
+    sha256: r.sha256,
+    contentType: r.content_type,
+    kind: r.kind,
+    access: r.relay_access,
+    state: r.state,
+    attempts: r.attempts,
+    commandId: r.command_id,
+    error: r.error,
+    reason: r.reason,
+    savedAs: r.saved_as,
+    verified: r.verified,
+    verification: r.verification,
+    receivedBytes: r.received_bytes,
+    receivedAt: ms(r.received_at),
+    blobUrl: r.blob_url,
+    blobPathname: r.blob_pathname,
+    createdAt: ms(r.created_at),
+    updatedAt: ms(r.updated_at),
+    expiresAt: ms(r.expires_at),
+    completedAt: ms(r.completed_at),
   };
 }
 
-/** Load a transfer and check it belongs to this customer. */
-export async function requireOwnTransfer(user, id) {
-  const t = await getTransfer(String(id || ''));
-  if (!t || t.userId !== user.id) throw httpError(404, 'Transfer not found', 'no-transfer');
-  return t;
+/** What the browser may see: never the blob URL, the owner id or any token. */
+export function transferView(tr) {
+  const progressFresh = tr.state === 'queued' && tr.receivedAt && Date.now() - tr.receivedAt < 10 * 60_000;
+  return {
+    id: tr.id,
+    deviceId: tr.deviceId,
+    filename: tr.filename,
+    size: tr.size,
+    sha256: tr.sha256,
+    contentType: tr.contentType,
+    kind: tr.kind,
+    state: tr.state,
+    relay: 'cloud',               // relay-based transfer, not peer-to-peer
+    access: tr.access,
+    createdAt: tr.createdAt,
+    updatedAt: tr.updatedAt,
+    expiresAt: tr.expiresAt,
+    attempts: tr.attempts || 0,
+    error: tr.error || null,
+    reason: tr.reason || null,
+    savedAs: tr.savedAs || null,
+    verified: Boolean(tr.verified),
+    verification: tr.verification || null,
+    completedAt: tr.completedAt || null,
+    cloudCopy: Boolean(tr.blobUrl),
+    ...(progressFresh && Number.isFinite(tr.receivedBytes) && { receivedBytes: tr.receivedBytes }),
+  };
 }
 
-async function deleteCopy(t) {
-  if (!t.blobUrl) return true;
-  const ok = await safeDelete(t.blobUrl);
-  if (ok) {
-    t.blobUrl = null;
-    t.blobDeletedAt = Date.now();
-  }
-  return ok;
+/** A transfer of this customer (RLS context 'user'), locked for update. */
+export async function requireOwnTransfer(t, user, id) {
+  if (!TRANSFER_ID_RX.test(String(id || ''))) throw httpError(404, 'Transfer not found', 'no-transfer');
+  const [r] = await t`select * from nsignage.transfers where id = ${id} and user_id = ${user.id} for update`;
+  if (!r) throw httpError(404, 'Transfer not found', 'no-transfer');
+  return transferFromRow(r);
+}
+
+async function update(t, id, fields) {
+  const [r] = await t`update nsignage.transfers set ${t(fields)} where id = ${id} returning *`;
+  return transferFromRow(r);
 }
 
 // ---- Create --------------------------------------------------------------------
 
-function maxBytesFor(device) {
-  // Agent protocol 2 may raise its own limit; agent 1.0 stays at 500 MB
-  const agentMax = Number.isSafeInteger(device.maxUploadBytes) ? device.maxUploadBytes : AGENT_V1_MAX_BYTES;
-  return Math.min(MAX_UPLOAD_BYTES, agentMax);
-}
+// Agent protocol 2 may announce a higher limit later; agent 1.0 refuses > 500 MB.
+const maxBytesFor = () => Math.min(MAX_UPLOAD_BYTES, AGENT_V1_MAX_BYTES);
 
-export async function createTransfer(user, device, body) {
+export async function createTransfer(t, user, device, body) {
   const original = String(body.filename || '');
   const type = mediaTypeOf(original);
   if (!type) throw httpError(415, 'Unsupported file type.', 'unsupported-type');
   const filename = safeMediaName(original);
   const size = Number(body.size);
   if (!Number.isSafeInteger(size) || size <= 0) throw httpError(400, 'Invalid file size');
-  const max = maxBytesFor(device);
+  const max = maxBytesFor();
   if (size > max) {
     throw httpError(413, `This file is ${Math.ceil(size / MiB)} MB. The limit for this display is ${Math.floor(max / MiB)} MB.`, 'too-large');
   }
@@ -134,141 +149,109 @@ export async function createTransfer(user, device, body) {
   if (access === 'private' && !hasCapability(device, 'private-blob')) {
     throw httpError(409, 'This display needs a software update before it can receive files (private transfers are enabled).', 'agent-update-required');
   }
-
-  // Abuse limit: open transfers per account
-  const r = redis();
-  const recent = (await r.zrange(keys.userTransfers(user.id), 0, -1)) || [];
-  const records = recent.length ? await r.mget(...recent.map(keys.transfer)) : [];
-  const active = records.filter((t) => t && !isFinal(t)).length;
-  if (active >= MAX_ACTIVE_PER_USER) {
+  const [{ n }] = await t`select count(*)::int as n from nsignage.transfers
+                          where user_id = ${user.id} and state in ('created', 'queued', 'failed')`;
+  if (n >= MAX_ACTIVE_PER_USER) {
     throw httpError(429, 'Too many unfinished transfers. Cancel or wait for some to finish first.', 'too-many-transfers');
   }
-
-  const now = Date.now();
-  const t = {
-    id: newTransferId(),
-    userId: user.id,
-    deviceId: device.deviceId,
-    filename,
-    originalName: original.slice(0, 200),
-    size,
-    sha256,
-    contentType: type.mime,
-    kind: type.kind,
-    access,
-    state: 'created',
-    attempts: 0,
-    createdAt: now,
-    expiresAt: now + TRANSFER_TTL_MS,
-    blobUrl: null,
-    commandId: null,
-  };
-  await saveTransfer(t);
-  await r.zadd(keys.transferIndex(), { score: t.expiresAt, member: t.id });
-  await r.zadd(keys.userTransfers(user.id), { score: now, member: t.id });
-  await r.zremrangebyrank(keys.userTransfers(user.id), 0, -(HISTORY_PER_USER + 1));
-  console.log('[N-SIGNAGE TRANSFER] created', JSON.stringify({ transfer: t.id, user: user.id, deviceId: t.deviceId, size }));
-  return t;
+  // RLS (transfers_owner) also requires the device to belong to this customer
+  const [r] = await t`
+    insert into nsignage.transfers
+      (id, user_id, device_id, filename, original_name, size_bytes, sha256, content_type, kind, relay_access, state, expires_at)
+    values (${newTransferId()}, ${user.id}, ${device.deviceId}, ${filename}, ${original.slice(0, 200)}, ${size}, ${sha256},
+            ${type.mime}, ${type.kind}, ${access}, 'created', now() + make_interval(secs => ${TRANSFER_TTL_S}))
+    returning *`;
+  const tr = transferFromRow(r);
+  console.log('[N-SIGNAGE TRANSFER] created', JSON.stringify({ transfer: tr.id, user: user.id, deviceId: tr.deviceId, size }));
+  return tr;
 }
 
 // ---- Upload token (Vercel Blob client upload) -------------------------------------
 
-/**
- * Called from handleUpload's onBeforeGenerateToken. The browser may only
- * write exactly this transfer's path, with exactly its size and type.
- */
-export async function uploadTokenOptions(user, pathname, transferId) {
-  const t = await requireOwnTransfer(user, transferId);
-  if (t.state !== 'created') throw httpError(409, 'This transfer is not waiting for an upload.', 'bad-state');
-  if (Date.now() > t.expiresAt) throw httpError(410, 'This transfer has expired. Start a new upload.', 'expired');
-  if (pathname !== `${pathPrefix(t)}${t.filename}`) throw httpError(400, 'Invalid upload path');
+/** The browser may only write exactly this transfer's path, with exactly its size and type. */
+export function uploadTokenOptions(tr, pathname) {
+  if (tr.state !== 'created') throw httpError(409, 'This transfer is not waiting for an upload.', 'bad-state');
+  if (Date.now() > tr.expiresAt) throw httpError(410, 'This transfer has expired. Start a new upload.', 'expired');
+  if (pathname !== uploadPathname(tr)) throw httpError(400, 'Invalid upload path');
   return {
-    allowedContentTypes: [t.contentType],
-    maximumSizeInBytes: t.size,
+    allowedContentTypes: [tr.contentType],
+    maximumSizeInBytes: tr.size,
     addRandomSuffix: true,
     validUntil: Date.now() + UPLOAD_TOKEN_MS,
-    tokenPayload: JSON.stringify({ transferId: t.id }),
+    tokenPayload: JSON.stringify({ transferId: tr.id }),
   };
 }
 
-export const uploadPathname = (t) => `${pathPrefix(t)}${t.filename}`;
-
 // ---- Commit: the browser finished uploading to the relay ---------------------------
 
-export async function commitTransfer(t, device, url) {
-  if (t.state !== 'created') throw httpError(409, 'This transfer was already submitted.', 'bad-state');
-  const pathname = blobPathname(String(url || ''), t.access);
-  if (!pathname || !pathname.startsWith(pathPrefix(t))) throw httpError(400, 'Invalid upload URL', 'bad-url');
-
-  const reject = async (status, message, reason) => {
-    await safeDelete(url);
-    t.error = message;
-    t.reason = reason;
-    await saveTransfer(t);
-    throw httpError(status, message, reason);
-  };
-
+/**
+ * Check the uploaded relay copy (path, size, real content). Network calls to
+ * Blob only — run this BEFORE opening a database transaction.
+ * Returns the blob pathname.
+ */
+export async function verifyUploadedCopy(tr, url) {
+  if (tr.state !== 'created') throw httpError(409, 'This transfer was already submitted.', 'bad-state');
+  const pathname = blobPathname(String(url || ''), tr.access);
+  if (!pathname || !pathname.startsWith(pathPrefix(tr))) throw httpError(400, 'Invalid upload URL', 'bad-url');
   let info;
   try {
     info = await blobStore.head(url);
   } catch (err) {
-    console.error('[N-SIGNAGE TRANSFER] head failed', t.id, err.message);
+    console.error('[N-SIGNAGE TRANSFER] head failed', tr.id, err.message);
     throw httpError(502, 'Could not confirm the upload. Please retry.', 'relay-error');
   }
   if (!info) throw httpError(409, 'The uploaded file was not found. Please upload it again.', 'upload-missing');
-  if (info.size !== t.size) return reject(422, 'The uploaded file size does not match. Please upload it again.', 'size-mismatch');
-
+  if (info.size !== tr.size) {
+    await safeDelete(url);
+    throw httpError(422, 'The uploaded file size does not match. Please upload it again.', 'size-mismatch');
+  }
   let prefix;
   try {
-    prefix = await blobStore.readPrefix(url, 32, t.access);
+    prefix = await blobStore.readPrefix(url, 32, tr.access);
   } catch (err) {
-    console.error('[N-SIGNAGE TRANSFER] content check failed', t.id, err.message);
+    console.error('[N-SIGNAGE TRANSFER] content check failed', tr.id, err.message);
     throw httpError(502, 'Could not check the uploaded file. Please retry.', 'relay-error');
   }
-  if (!contentMatches(extOf(t.filename), prefix)) {
-    return reject(415, `The file content is not a valid ${extOf(t.filename).toUpperCase()} file.`, 'content-mismatch');
+  if (!contentMatches(extOf(tr.filename), prefix)) {
+    await safeDelete(url);
+    throw httpError(415, `The file content is not a valid ${extOf(tr.filename).toUpperCase()} file.`, 'content-mismatch');
   }
-
-  // A previous copy (re-upload after a failure) is replaced
-  if (t.blobUrl && t.blobUrl !== url) await safeDelete(t.blobUrl);
-  t.blobUrl = url;
-  t.blobPathname = pathname;
-  t.error = null;
-  t.reason = null;
-  await queueForPi(t);
-  console.log('[N-SIGNAGE TRANSFER] queued for Pi', JSON.stringify({ transfer: t.id, deviceId: t.deviceId, online: Boolean(device) }));
-  return t;
+  return pathname;
 }
 
-async function queueForPi(t) {
-  const cmd = await enqueueCommand(t.deviceId, {
-    type: 'download',
-    transferId: t.id,
-    // Public mode: agent 1.0 reads `url`. Private mode: filled in per sync (presigned).
-    ...(t.access === 'public' && { url: t.blobUrl }),
-    filename: t.filename,
-    size: t.size,
-    sha256: t.sha256,
-  });
-  t.commandId = cmd.id;
-  t.state = 'queued';
-  t.attempts = (t.attempts || 0) + 1;
-  await saveTransfer(t);
+/**
+ * Queue a verified upload for the Pi (inside a transaction, with the transfer
+ * re-read FOR UPDATE). Returns { transfer, deleteAfterCommit }.
+ */
+export async function commitTransfer(t, tr, url, pathname) {
+  if (tr.state !== 'created') throw httpError(409, 'This transfer was already submitted.', 'bad-state');
+  const deleteAfterCommit = tr.blobUrl && tr.blobUrl !== url ? [tr.blobUrl] : [];
+  const queued = await queueForPi(t, tr, { blob_url: url, blob_pathname: pathname, error: null, reason: null });
+  console.log('[N-SIGNAGE TRANSFER] queued for Pi', JSON.stringify({ transfer: tr.id, deviceId: tr.deviceId }));
+  return { transfer: queued, deleteAfterCommit };
+}
+
+async function queueForPi(t, tr, extra = {}) {
+  const payload = { filename: tr.filename, size: tr.size, sha256: tr.sha256 };
+  const [cmd] = await t`
+    insert into nsignage.device_commands (device_id, type, payload, transfer_id)
+    values (${tr.deviceId}, 'download', ${t.json(payload)}, ${tr.id}) returning id`;
+  return update(t, tr.id, { ...extra, state: 'queued', command_id: cmd.id, attempts: (tr.attempts || 0) + 1 });
+}
+
+async function withdrawCommand(t, commandId) {
+  if (commandId) await t`update nsignage.device_commands set state = 'withdrawn' where id = ${commandId} and state = 'queued'`;
 }
 
 // ---- Cancel / retry -------------------------------------------------------------------
 
-export async function cancelTransfer(t, reason = 'Cancelled') {
-  if (isFinal(t)) throw httpError(409, `This transfer is already ${t.state}.`, 'bad-state');
-  if (t.commandId) await removeCommand(t.deviceId, t.commandId);
-  await deleteCopy(t);
-  t.state = 'cancelled';
-  t.error = reason;
-  t.reason = 'cancelled';
-  await saveTransfer(t);
-  await redis().zrem(keys.transferIndex(), t.id);
-  console.log('[N-SIGNAGE TRANSFER] cancelled', JSON.stringify({ transfer: t.id }));
-  return t;
+/** Returns { transfer, deleteAfterCommit }. */
+export async function cancelTransfer(t, tr, reason = 'Cancelled') {
+  if (isFinal(tr)) throw httpError(409, `This transfer is already ${tr.state}.`, 'bad-state');
+  await withdrawCommand(t, tr.commandId);
+  const transfer = await update(t, tr.id, { state: 'cancelled', error: reason.slice(0, 300), reason: 'cancelled' });
+  console.log('[N-SIGNAGE TRANSFER] cancelled', JSON.stringify({ transfer: tr.id }));
+  return { transfer, deleteAfterCommit: tr.blobUrl ? [tr.blobUrl] : [] };
 }
 
 /**
@@ -276,159 +259,183 @@ export async function cancelTransfer(t, reason = 'Cancelled') {
  * downloads it again; otherwise the transfer goes back to "created" and the
  * browser must upload the file again (same checksum).
  */
-export async function retryTransfer(t) {
-  if (t.state !== 'failed' && t.state !== 'created') throw httpError(409, `A ${t.state} transfer cannot be retried.`, 'bad-state');
-  if (Date.now() > t.expiresAt) throw httpError(410, 'This transfer has expired. Start a new upload.', 'expired');
-  if (t.state === 'created') return { transfer: t, needsUpload: true };
-  if ((t.attempts || 0) >= MAX_ATTEMPTS) {
-    throw httpError(429, 'This transfer failed too many times. Start a new upload.', 'too-many-attempts');
-  }
-  if (t.commandId) await removeCommand(t.deviceId, t.commandId);
-  if (t.blobUrl) {
-    t.error = null;
-    t.reason = null;
-    await queueForPi(t);
-    return { transfer: t, needsUpload: false };
-  }
-  t.state = 'created';
-  t.commandId = null;
-  t.error = null;
-  t.reason = null;
-  await saveTransfer(t);
-  return { transfer: t, needsUpload: true };
+export async function retryTransfer(t, tr) {
+  if (tr.state !== 'failed' && tr.state !== 'created') throw httpError(409, `A ${tr.state} transfer cannot be retried.`, 'bad-state');
+  if (Date.now() > tr.expiresAt) throw httpError(410, 'This transfer has expired. Start a new upload.', 'expired');
+  if (tr.state === 'created') return { transfer: tr, needsUpload: true };
+  if ((tr.attempts || 0) >= MAX_ATTEMPTS) throw httpError(429, 'This transfer failed too many times. Start a new upload.', 'too-many-attempts');
+  await withdrawCommand(t, tr.commandId);
+  if (tr.blobUrl) return { transfer: await queueForPi(t, tr, { error: null, reason: null }), needsUpload: false };
+  const transfer = await update(t, tr.id, { state: 'created', command_id: null, error: null, reason: null });
+  return { transfer, needsUpload: true };
 }
 
-// ---- Pi side: results, progress, command delivery -------------------------------------
+// ---- Pi side: results, progress, command delivery (RLS context 'device') -------------
 
-/** Apply results reported by a Pi on /api/pi/sync (cleaned by completeCommands). */
-export async function applyTransferResults(deviceId, results) {
-  for (const res of results || []) {
-    if (!res.transferId) continue;
-    const t = await getTransfer(res.transferId);
-    if (!t || t.deviceId !== deviceId) continue;
-    if (t.state === 'completed' || t.state === 'expired') continue;
-    if (t.commandId && res.id !== t.commandId && t.state !== 'cancelled') continue; // stale attempt
+/**
+ * Record command results reported by a Pi and update their transfers.
+ * Returns relay URLs to delete after the transaction commits.
+ */
+export async function applyCommandResults(t, deviceId, results) {
+  const deleteAfterCommit = [];
+  for (const res of results) {
+    const [cmd] = await t`
+      update nsignage.device_commands
+         set state = ${res.ok ? 'done' : 'failed'}, error = ${res.error}, completed_at = now(),
+             result = ${t.json({ filename: res.filename, sha256: res.sha256, size: res.size, reason: res.reason })}
+       where id = ${res.id} and device_id = ${deviceId} and state in ('queued', 'withdrawn')
+      returning transfer_id`;
+    if (!cmd?.transfer_id) continue;
+    const [row] = await t`select * from nsignage.transfers where id = ${cmd.transfer_id} and device_id = ${deviceId} for update`;
+    const tr = transferFromRow(row);
+    if (!tr || tr.state === 'completed' || tr.state === 'expired') continue;
+    if (tr.commandId && res.id !== tr.commandId && tr.state !== 'cancelled') continue; // stale attempt
 
+    let fields;
     if (res.ok) {
-      if (res.sha256 && res.sha256 !== t.sha256) {
-        failTransfer(t, 'The file arrived damaged on the display (checksum mismatch). Retry the transfer.', 'checksum-mismatch');
-      } else if (res.size !== undefined && res.size !== t.size) {
-        failTransfer(t, 'The file arrived incomplete on the display (size mismatch). Retry the transfer.', 'size-mismatch');
+      if (res.sha256 && res.sha256 !== tr.sha256) {
+        fields = { state: 'failed', error: 'The file arrived damaged on the display (checksum mismatch). Retry the transfer.', reason: 'checksum-mismatch' };
+      } else if (res.size !== null && res.size !== tr.size) {
+        fields = { state: 'failed', error: 'The file arrived incomplete on the display (size mismatch). Retry the transfer.', reason: 'size-mismatch' };
       } else {
-        const wasCancelled = t.state === 'cancelled';
-        t.state = 'completed';
-        t.savedAs = res.filename || t.filename;
-        t.completedAt = Date.now();
-        t.verified = Boolean(res.sha256);
-        t.verification = res.sha256 ? 'sha256-verified-on-pi' : 'saved-on-pi-unverified';
-        t.error = wasCancelled ? 'The display had already saved the file before the transfer was cancelled.' : null;
-        t.reason = null;
+        fields = {
+          state: 'completed',
+          saved_as: (res.filename || tr.filename).slice(0, 220),
+          completed_at: new Date(),
+          verified: Boolean(res.sha256),
+          verification: res.sha256 ? 'sha256-verified-on-pi' : 'saved-on-pi-unverified',
+          error: tr.state === 'cancelled' ? 'The display had already saved the file before the transfer was cancelled.' : null,
+          reason: null,
+        };
         // The Pi has the file: the relay copy is no longer needed
-        await deleteCopy(t);
-        await redis().zrem(keys.transferIndex(), t.id);
+        if (tr.blobUrl) deleteAfterCommit.push(tr.blobUrl);
       }
-    } else if (t.state !== 'cancelled') {
-      failTransfer(t, res.error || 'The display could not save the file.', res.reason || 'pi-error');
+    } else if (tr.state !== 'cancelled') {
+      fields = { state: 'failed', error: res.error || 'The display could not save the file.', reason: res.reason || 'pi-error' };
     } else {
       continue;
     }
-    await saveTransfer(t);
-    console.log('[N-SIGNAGE TRANSFER] Pi result', JSON.stringify({ transfer: t.id, state: t.state, verified: t.verified, reason: t.reason }));
+    await update(t, tr.id, fields);
+    console.log('[N-SIGNAGE TRANSFER] Pi result', JSON.stringify({ transfer: tr.id, state: fields.state, verified: Boolean(fields.verified), reason: fields.reason }));
   }
-}
-
-function failTransfer(t, message, reason) {
-  t.state = 'failed';
-  t.error = String(message).slice(0, 300);
-  t.reason = reason;
+  return deleteAfterCommit;
 }
 
 /** Agent protocol 2 progress reports: [{ transferId, receivedBytes }]. */
-export async function applyTransferProgress(deviceId, progress) {
+export async function applyTransferProgress(t, deviceId, progress) {
   if (!Array.isArray(progress)) return;
   for (const p of progress.slice(0, 20)) {
     if (!p || !TRANSFER_ID_RX.test(p.transferId || '') || !Number.isSafeInteger(p.receivedBytes) || p.receivedBytes < 0) continue;
-    const t = await getTransfer(p.transferId);
-    if (!t || t.deviceId !== deviceId || t.state !== 'queued') continue;
-    await redis().set(keys.transferProgress(t.id), Math.min(p.receivedBytes, t.size), { ex: 600 });
+    await t`update nsignage.transfers set received_bytes = least(${p.receivedBytes}, size_bytes), received_at = now()
+            where id = ${p.transferId} and device_id = ${deviceId} and state = 'queued'`;
   }
 }
 
-export async function transferProgress(t) {
-  const v = await redis().get(keys.transferProgress(t.id));
-  return v === null || v === undefined ? null : Number(v);
-}
-
 /**
- * Commands about to be handed to a Pi: drop downloads whose transfer is no
- * longer active and, in private mode, attach a fresh short-lived URL.
+ * Commands to hand to a Pi. Downloads whose transfer is no longer active are
+ * withdrawn; in private mode a fresh short-lived URL is attached.
  */
-export async function prepareCommandsForDevice(deviceId, commands) {
+export async function pendingCommandsForPi(t, deviceId) {
+  const rows = await t`
+    select c.id, c.type, c.payload, c.transfer_id, c.created_at,
+           tr.state as t_state, tr.blob_url, tr.blob_pathname, tr.command_id as t_command, tr.relay_access
+    from nsignage.device_commands c
+    left join nsignage.transfers tr on tr.id = c.transfer_id
+    where c.device_id = ${deviceId} and c.state = 'queued'
+    order by c.created_at
+    limit 20`;
   const out = [];
-  for (const cmd of commands) {
-    if (cmd.type !== 'download' || !cmd.transferId) { out.push(cmd); continue; }
-    const t = await getTransfer(cmd.transferId);
-    if (!t || t.state !== 'queued' || !t.blobUrl || t.commandId !== cmd.id) {
-      await removeCommand(deviceId, cmd.id); // stale: never hand it to the Pi
+  for (const c of rows) {
+    const base = { id: c.id, type: c.type, createdAt: c.created_at.getTime() };
+    if (c.type === 'delete') { out.push({ ...base, filename: c.payload.filename }); continue; }
+    if (!c.transfer_id) {
+      // download queued by the pre-transfer flow (imported from Redis): payload carries its own URL
+      if (c.payload.url) out.push({ ...base, url: c.payload.url, filename: c.payload.filename, size: c.payload.size || null });
       continue;
     }
-    if (t.access === 'private') {
-      try {
-        out.push({ ...cmd, url: await blobStore.presignGet(t.blobPathname, Date.now() + PRESIGN_MS) });
-      } catch (err) {
-        console.error('[N-SIGNAGE TRANSFER] presign failed', t.id, err.message);
-      }
-    } else {
-      out.push(cmd);
+    if (c.t_state !== 'queued' || !c.blob_url || c.t_command !== c.id) {
+      await t`update nsignage.device_commands set state = 'withdrawn' where id = ${c.id}`; // stale: never hand it out
+      continue;
     }
+    let url = c.blob_url;
+    if (c.relay_access === 'private') {
+      try {
+        url = await blobStore.presignGet(c.blob_pathname, Date.now() + PRESIGN_MS);
+      } catch (err) {
+        console.error('[N-SIGNAGE TRANSFER] presign failed', c.transfer_id, err.message);
+        continue;
+      }
+    }
+    out.push({ ...base, transferId: c.transfer_id, url, filename: c.payload.filename, size: c.payload.size, sha256: c.payload.sha256 });
   }
   return out;
 }
 
-// ---- Lists, cleanup --------------------------------------------------------------------
+// ---- Lists ------------------------------------------------------------------------------
 
-export async function listTransfers(user, limit = 30) {
-  const r = redis();
-  const ids = ((await r.zrange(keys.userTransfers(user.id), 0, -1)) || []).reverse().slice(0, limit);
-  if (!ids.length) return [];
-  const records = await r.mget(...ids.map(keys.transfer));
-  const out = [];
-  for (const t of records) {
-    if (!t) continue;
-    out.push(transferView(t, t.state === 'queued' ? await transferProgress(t) : null));
-  }
-  return out;
+export async function listTransfers(t, user, limit = 30) {
+  const rows = await t`select * from nsignage.transfers where user_id = ${user.id} order by created_at desc limit ${limit}`;
+  return rows.map((r) => transferView(transferFromRow(r)));
 }
 
-/** Expire transfers past their deadline and delete their relay copies. */
-export async function expireTransfers({ now = Date.now(), limit = 100 } = {}) {
-  const r = redis();
-  const ids = ((await r.zrange(keys.transferIndex(), 0, now, { byScore: true })) || []).slice(0, limit);
+// ---- Cleanup ('system' context) -------------------------------------------------------
+
+/** Expire overdue transfers. Returns { expired, deleteAfterCommit }. */
+export async function expireTransfers(t, limit = 100) {
+  const rows = await t`
+    select * from nsignage.transfers
+    where expires_at < now() and (blob_url is not null or state in ('created', 'queued', 'failed'))
+    order by expires_at limit ${limit}
+    for update skip locked`;
   let expired = 0;
-  let copiesDeleted = 0;
-  for (const id of ids) {
-    const t = await getTransfer(String(id));
-    if (t && !isFinal(t)) {
-      if (t.commandId) await removeCommand(t.deviceId, t.commandId);
-      t.state = 'expired';
-      t.error = 'The transfer expired before the display received the file.';
-      t.reason = 'expired';
+  const deleteAfterCommit = [];
+  for (const r of rows) {
+    const tr = transferFromRow(r);
+    if (!isFinal(tr)) {
+      await withdrawCommand(t, tr.commandId);
+      await update(t, tr.id, { state: 'expired', error: 'The transfer expired before the display received the file.', reason: 'expired' });
       expired += 1;
     }
-    if (t?.blobUrl) {
-      if (await deleteCopy(t)) copiesDeleted += 1;
-      else continue; // keep it indexed; try again next time
-    }
-    if (t) await saveTransfer(t);
-    await r.zrem(keys.transferIndex(), String(id));
+    if (tr.blobUrl) deleteAfterCommit.push(tr.blobUrl);
   }
-  return { checked: ids.length, expired, copiesDeleted };
+  return { checked: rows.length, expired, deleteAfterCommit };
+}
+
+/** Cancel every unfinished transfer to one Pi (device removed). Returns URLs to delete. */
+export async function cancelDeviceTransfers(t, deviceId, reason) {
+  const rows = await t`select * from nsignage.transfers where device_id = ${deviceId}
+                       and (state in ('created', 'queued', 'failed') or blob_url is not null) for update`;
+  const urls = [];
+  for (const r of rows) {
+    const tr = transferFromRow(r);
+    if (!isFinal(tr)) {
+      await withdrawCommand(t, tr.commandId);
+      await update(t, tr.id, { state: 'cancelled', error: reason, reason: 'cancelled' });
+    }
+    if (tr.blobUrl) urls.push(tr.blobUrl);
+  }
+  return urls;
 }
 
 /**
- * Delete relay blobs that no active transfer points to (e.g. an upload that
- * finished but was never committed). Only touches the transfers/ prefix,
- * plus the old media/ prefix when NSIGNAGE_PURGE_LEGACY_BLOBS=1.
+ * Delete relay copies from Blob AFTER the database commit, then clear their
+ * URLs. Anything that fails stays recorded and is retried by the cron.
+ */
+export async function deleteRelayCopies(urls) {
+  const list = [...new Set((urls || []).filter(Boolean))];
+  if (!list.length) return 0;
+  if (!(await safeDelete(list))) return 0;
+  await asSystem(async (t) => {
+    await t`update nsignage.transfers set blob_url = null, blob_deleted_at = now() where blob_url = any(${list}::text[])`;
+    await t`update nsignage.legacy_relay_copies set deleted_at = now() where url = any(${list}::text[]) and deleted_at is null`;
+  });
+  return list.length;
+}
+
+/**
+ * Delete relay blobs that no active transfer points to (e.g. uploaded but
+ * never committed). Only touches the transfers/ prefix, plus old media/
+ * copies listed in legacy_relay_copies when NSIGNAGE_PURGE_LEGACY_BLOBS=1.
  */
 export async function sweepOrphanBlobs({ now = Date.now(), graceMs = 2 * 3600 * 1000 } = {}) {
   let deleted = 0;
@@ -436,55 +443,23 @@ export async function sweepOrphanBlobs({ now = Date.now(), graceMs = 2 * 3600 * 
   do {
     const page = await blobStore.list('transfers/', cursor);
     cursor = page.cursor;
-    const stale = [];
-    for (const b of page.blobs) {
-      if (now - b.uploadedAt < graceMs) continue;
-      const id = b.pathname.split('/')[2];
-      const t = await getTransfer(id);
-      if (!t || isFinal(t) || t.blobUrl !== b.url || now > t.expiresAt) stale.push(b.url);
+    const old = page.blobs.filter((b) => now - b.uploadedAt >= graceMs);
+    if (old.length) {
+      const ids = [...new Set(old.map((b) => b.pathname.split('/')[2]).filter((id) => TRANSFER_ID_RX.test(id || '')))];
+      const keep = new Set(
+        (await asSystem((t) => t`select blob_url from nsignage.transfers
+                                  where id = any(${ids}::text[]) and blob_url is not null
+                                    and state in ('created', 'queued', 'failed') and expires_at > now()`)).map((r) => r.blob_url),
+      );
+      const stale = old.map((b) => b.url).filter((u) => !keep.has(u));
+      if (stale.length && (await safeDelete(stale))) deleted += stale.length;
     }
-    if (stale.length && (await safeDelete(stale))) deleted += stale.length;
   } while (cursor);
 
   let legacyDeleted = 0;
   if (process.env.NSIGNAGE_PURGE_LEGACY_BLOBS === '1') {
-    cursor = null;
-    do {
-      const page = await blobStore.list('media/', cursor);
-      cursor = page.cursor;
-      const urls = page.blobs.map((b) => b.url);
-      if (urls.length && (await safeDelete(urls))) legacyDeleted += urls.length;
-    } while (cursor);
+    const legacy = (await asSystem((t) => t`select url from nsignage.legacy_relay_copies where deleted_at is null limit 1000`)).map((r) => r.url);
+    legacyDeleted = await deleteRelayCopies(legacy);
   }
   return { orphanCopiesDeleted: deleted, legacyCopiesDeleted: legacyDeleted };
 }
-
-/** Cancel every unfinished transfer of this account to one Pi (device removed). */
-export async function cancelDeviceTransfers(userId, deviceId, reason) {
-  const r = redis();
-  const ids = (await r.zrange(keys.userTransfers(userId), 0, -1)) || [];
-  let n = 0;
-  for (const id of ids) {
-    const t = await getTransfer(String(id));
-    if (!t || t.deviceId !== deviceId) continue;
-    if (!isFinal(t)) {
-      await cancelTransfer(t, reason);
-      n += 1;
-    } else if (t.blobUrl) {
-      await deleteCopy(t);
-      await saveTransfer(t);
-    }
-  }
-  return n;
-}
-
-/** Cloud copies made by the pre-transfer upload flow (ns:blob:<deviceId>). */
-export async function deleteLegacyBlobs(deviceId) {
-  const r = redis();
-  const blobs = (await r.hgetall(keys.blobs(deviceId))) || {};
-  const urls = Object.values(blobs).map((b) => parse(b).url).filter(Boolean);
-  if (urls.length) await safeDelete(urls);
-  await r.del(keys.blobs(deviceId));
-  return urls.length;
-}
-

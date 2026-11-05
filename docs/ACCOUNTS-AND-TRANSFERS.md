@@ -1,5 +1,14 @@
 # N-Signage — Customer accounts, pairing and relay transfers (Phase 2)
 
+> **Storage update:** this document was written for the first Phase 2 build,
+> which kept data in Upstash Redis (preserved on branch `phase2-redis`). The
+> current build stores everything in **Supabase PostgreSQL**; Redis is no
+> longer used. The behaviour, API and security rules below are unchanged, but
+> the Redis-specific parts (the Redis key table in §2, `KV_*` variables in §7,
+> deploy steps in §8, test results in §10) are replaced by
+> [SUPABASE-SETUP.md](SUPABASE-SETUP.md) and the schema in
+> [`supabase/migrations/`](../supabase/migrations/).
+
 Applies to the hosted website (cloud mode, e.g. https://software.nsinages.in).
 LAN mode (`npm start` / `npm run dev` on localhost or a LAN address) is unchanged
 and still needs no login.

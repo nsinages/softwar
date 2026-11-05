@@ -1,17 +1,39 @@
-// End-to-end tests of the cloud API handlers against an in-memory Upstash
-// server and an in-memory Blob backend. Run: npm test
+// End-to-end tests of the cloud API handlers against real PostgreSQL (in-process
+// PGlite with the Supabase migration, or a real Supabase TEST project when
+// TEST_DATABASE_URL is set) and an in-memory Blob backend. Run: npm test
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { setupEnv, memoryBlob, Client, ORIGIN } from './helpers/harness.js';
 
-let upstash; let blob;
+let database; let blob; let db;
 let auth; let devices; let device; let find; let sync; let pairing; let transfer; let cron; let health;
-let blobStore; let transfers;
+let blobStore;
+
+// Everything a run creates, so it can be removed again from a real Supabase test project
+const created = { users: new Set(), devices: new Set(), legacyBrowsers: new Set(), usernames: new Set() };
+
+async function cleanup() {
+  const users = [...created.users];
+  const devs = [...created.devices];
+  const { keyHash } = await import('../api/_lib/cloud.js');
+  await db.asSystem(async (t) => {
+    const named = await t`select id from nsignage.users where username = any(${[...created.usernames]}::text[])`;
+    const ids = [...new Set([...users, ...named.map((r) => r.id)])];
+    await t`delete from nsignage.transfers where user_id = any(${ids}::uuid[]) or device_id = any(${devs}::text[])`;
+    await t`update nsignage.devices set owner_id = null, added_at = null, added_via = null
+            where owner_id = any(${ids}::uuid[]) or id = any(${devs}::text[])`;
+    await t`delete from nsignage.devices where id = any(${devs}::text[])`;
+    await t`delete from nsignage.users where id = any(${ids}::uuid[])`;
+    await t`delete from nsignage.legacy_browser_sessions where browser_id = any(${[...created.legacyBrowsers]}::uuid[])`;
+    await t`delete from nsignage.rate_limits where key_hash = any(${[...created.usernames].map(keyHash)}::text[])`;
+  });
+}
 
 before(async () => {
-  upstash = await setupEnv();
+  database = await setupEnv();
+  db = await import('../api/_lib/db.js');
   ({ default: auth } = await import('../api/auth.js'));
   ({ default: devices } = await import('../api/devices.js'));
   ({ default: device } = await import('../api/device.js'));
@@ -22,11 +44,15 @@ before(async () => {
   ({ default: cron } = await import('../api/cron/cleanup.js'));
   ({ default: health } = await import('../api/health.js'));
   blobStore = await import('../api/_lib/blobStore.js');
-  transfers = await import('../api/_lib/transfers.js');
   blob = memoryBlob();
   blobStore.setBlobBackend(blob.backend);
 });
-after(() => upstash.close());
+after(async () => {
+  if (database.external) await cleanup();
+  await db.closeDb();
+  await database.close();
+});
+const sql = (fn) => db.asSystem(fn);
 
 // ---- helpers -------------------------------------------------------------------
 
@@ -38,13 +64,17 @@ const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), crypto.random
 const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), crypto.randomBytes(5000)]);
 
 async function register(client, username, password = PASSWORD) {
-  return client.call(auth, { method: 'POST', query: { action: 'register' }, body: { username, password } });
+  created.usernames.add(String(username).toLowerCase());
+  const r = await client.call(auth, { method: 'POST', query: { action: 'register' }, body: { username, password } });
+  if (r.body?.user?.id) created.users.add(r.body.user.id);
+  return r;
 }
 
 class Pi extends Client {
   constructor(ip, extra = {}) {
     super('pi', ip);
     this.deviceId = devId();
+    created.devices.add(this.deviceId);
     this.secret = secret();
     this.extra = extra;
     this.results = [];
@@ -121,17 +151,18 @@ test('register → session cookie, recovery key, unique usernames, no plaintext 
   assert.equal(me.status, 200);
   assert.equal(me.body.user.passwordHash, undefined);
   assert.equal(me.body.user.recoveryHash, undefined);
-  for (const [, e] of upstash.store.data) {
-    const text = typeof e.value === 'string' ? e.value : JSON.stringify([...e.value]);
+  const [row] = await sql((t) => t`select row_to_json(u)::text as j, password_hash from nsignage.users u where id = ${r.body.user.id}`);
+  const sessions = await sql((t) => t`select row_to_json(s)::text as j from nsignage.user_sessions s where user_id = ${r.body.user.id}`);
+  for (const text of [row.j, ...sessions.map((x) => x.j)]) {
     assert.ok(!text.includes(PASSWORD), 'password never stored in clear');
     assert.ok(!text.includes(r.body.recoveryKey), 'recovery key never stored in clear');
+    assert.ok(!text.includes(c.cookies['__Host-ns_acct']), 'session token never stored in clear');
   }
-  const userKey = [...upstash.store.data.keys()].find((k) => k.startsWith('ns:user:'));
-  assert.match(upstash.store.data.get(userKey).value, /scrypt\$v1\$65536\$8\$2\$/);
+  assert.match(row.password_hash, /^scrypt\$v1\$65536\$8\$2\$/);
 });
 
 test('registration is rate limited per IP', async () => {
-  const c = new Client('spammer', '10.255.255.1');
+  const c = new Client('spammer'); // random IP: re-runnable against a persistent database
   const codes = [];
   for (let i = 0; i < 7; i += 1) codes.push((await register(c, `spam${i}user`)).status);
   assert.deepEqual(codes.slice(0, 5), [200, 200, 200, 200, 200]);
@@ -211,14 +242,14 @@ test('password recovery with recovery key (no email), single use', async () => {
 test('staff-assisted recovery: admin script issues a new key and signs out sessions', async () => {
   const c = new Client('staffcase');
   await register(c, 'lost.key.user');
-  // Async spawn: the in-memory Redis lives in this process and must keep serving
-  const run = (...args) => new Promise((resolve) => {
+  // The local test database accepts one connection: release ours while the script runs
+  const run = async (...args) => { await db.closeDb(); return new Promise((resolve) => {
     const p = spawn(process.execPath, ['scripts/nsignage-admin.mjs', ...args], { env: process.env });
     let stdout = ''; let stderr = '';
     p.stdout.on('data', (d) => { stdout += d; });
     p.stderr.on('data', (d) => { stderr += d; });
     p.on('exit', (status) => resolve({ status, stdout, stderr }));
-  });
+  }); };
   const info = await run('account', 'lost.key.user');
   assert.equal(info.status, 0, info.stderr);
   assert.ok(!info.stdout.includes('scrypt'), 'no password hash printed');
@@ -319,9 +350,11 @@ test('pairing codes: device-authenticated, single use, rejected when wrong/expir
   // expiry: the code key carries a 10-minute TTL
   const pi2 = new Pi('198.51.100.242'); await pi2.sync();
   const c = await pi2.requestCode();
-  const codeKey = [...upstash.store.data.keys()].find((k) => k.startsWith('ns:pair:') && upstash.store.data.get(k).value.includes(pi2.deviceId));
-  assert.ok(upstash.store.data.get(codeKey).exp - Date.now() <= 600_000);
-  upstash.store.data.get(codeKey).exp = Date.now() - 1; // simulate expiry
+  const [ttl] = await sql((t) => t`select extract(epoch from expires_at - created_at)::int as s from nsignage.pairing_codes
+                                  where device_id = ${pi2.deviceId} and used_at is null`);
+  assert.equal(ttl.s, 600, 'codes are valid 10 minutes');
+  await sql((t) => t`update nsignage.pairing_codes set created_at = now() - interval '11 minutes', expires_at = now() - interval '1 minute'
+                     where device_id = ${pi2.deviceId}`); // simulate expiry
   assert.equal((await frank.call(devices, { method: 'POST', query: { action: 'pair' }, body: { code: c.body.code } })).status, 400, 'expired');
 
   let limited = false;
@@ -339,12 +372,14 @@ test('legacy (pre-accounts) devices: verified one-time link, never automatic', a
   // Old anonymous browser data, exactly as the previous version stored it
   const token = crypto.randomBytes(32).toString('base64url');
   const browserId = crypto.randomUUID();
-  const s = upstash.store;
-  s.exec(['set', `ns:sess:${crypto.createHash('sha256').update(token).digest('hex')}`, JSON.stringify({ id: browserId, createdAt: Date.now() })]);
-  for (const p of [pi, pi2]) {
-    s.exec(['sadd', `ns:owners:${p.deviceId}`, browserId]);
-    s.exec(['hset', `ns:browser-devs:${browserId}`, p.deviceId, JSON.stringify({ name: 'Old name', location: 'Lobby', addedAt: 1 })]);
-  }
+  // (as imported from Redis by scripts/migrate-redis-to-supabase.mjs)
+  created.legacyBrowsers.add(browserId);
+  await sql(async (t) => {
+    await t`insert into nsignage.legacy_browser_sessions (token_hash, browser_id) values (${sha(token)}, ${browserId})`;
+    for (const p of [pi, pi2]) {
+      await t`insert into nsignage.legacy_browser_devices (browser_id, device_id, name, location) values (${browserId}, ${p.deviceId}, 'Old name', 'Lobby')`;
+    }
+  });
 
   const grace = new Client('grace', '203.0.113.200'); // away from the Pi's network
   await register(grace, 'grace');
@@ -374,14 +409,17 @@ test('legacy (pre-accounts) devices: verified one-time link, never automatic', a
 
   // another account with another old browser that also had the Pi cannot take it
   const token2 = crypto.randomBytes(32).toString('base64url'); const b2 = crypto.randomUUID();
-  s.exec(['set', `ns:sess:${crypto.createHash('sha256').update(token2).digest('hex')}`, JSON.stringify({ id: b2 })]);
-  s.exec(['sadd', `ns:owners:${pi.deviceId}`, b2]);
-  s.exec(['hset', `ns:browser-devs:${b2}`, pi.deviceId, JSON.stringify({ name: 'x' })]);
+  created.legacyBrowsers.add(b2);
+  await sql(async (t) => {
+    await t`insert into nsignage.legacy_browser_sessions (token_hash, browser_id) values (${sha(token2)}, ${b2})`;
+    await t`insert into nsignage.legacy_browser_devices (browser_id, device_id, name) values (${b2}, ${pi.deviceId}, 'x')`;
+  });
   const heidi = new Client('heidi', ip); await register(heidi, 'heidi'); heidi.cookies.ns_session = token2;
   assert.equal((await heidi.call(devices, { query: { action: 'legacy' } })).body.devices[0].status, 'other-account');
   assert.equal((await heidi.call(devices, { method: 'POST', query: { action: 'link-legacy' }, body: { deviceId: pi.deviceId } })).status, 409);
   // legacy data is preserved
-  assert.equal(s.exec(['scard', `ns:owners:${pi2.deviceId}`]).result, 1);
+  const [kept] = await sql((t) => t`select count(*)::int as n from nsignage.legacy_browser_devices where device_id = ${pi2.deviceId}`);
+  assert.equal(kept.n, 1);
 });
 
 test('re-flashed Pi cannot take over a claimed device id; removal lets it re-register', async () => {
@@ -497,8 +535,7 @@ test('Pi failure (e.g. storage full) → failed with the Pi’s reason; retry af
   let t = (await status(owner, a.id)).body.transfer;
   assert.equal(t.state, 'failed'); assert.equal(t.reason, 'insufficient-storage'); assert.match(t.error, /space/);
   blob.blobs.delete(a.url);
-  const tr = await transfers.getTransfer(a.id);
-  tr.blobUrl = null; await upstash.store.exec(['set', `ns:xfer:${a.id}`, JSON.stringify(tr)]);
+  await sql((t) => t`update nsignage.transfers set blob_url = null where id = ${a.id}`);
   const retry = await owner.call(transfer, { method: 'POST', query: { action: 'retry' }, body: { transferId: a.id } });
   assert.equal(retry.body.needsUpload, true); assert.equal(retry.body.transfer.state, 'created');
   const url = blob.put(retry.body.uploadPathname, JPEG);
@@ -517,9 +554,7 @@ test('expiry + cleanup cron: abandoned transfers expire, relay copies and orphan
   const orphan = blob.put(`transfers/${pi.deviceId}/AAAAAAAAAAAAAAAAAAAAAA/x.jpg`, JPEG, { uploadedAt: Date.now() - 5 * 3600 * 1000 });
   assert.equal((await new Client('x').call(cron)).status, 401);
   assert.equal((await new Client('x').call(cron, { headers: { authorization: 'Bearer wrong' } })).status, 401);
-  const t = await transfers.getTransfer(a.id);
-  upstash.store.exec(['zadd', 'ns:xfer-expiry', String(Date.now() - 1000), a.id]);
-  t.expiresAt = Date.now() - 1000; upstash.store.exec(['set', `ns:xfer:${a.id}`, JSON.stringify(t)]);
+  await sql((t) => t`update nsignage.transfers set expires_at = now() - interval '1 second' where id = ${a.id}`);
   const run = await new Client('cron').call(cron, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } });
   assert.equal(run.status, 200, JSON.stringify(run.body));
   assert.ok(run.body.expired >= 1);
@@ -591,9 +626,28 @@ test('transfer list and views never expose relay URLs or owner ids', async () =>
 
 test('health reports configuration flags only', async () => {
   const h = await new Client('h').call(health);
-  assert.equal(h.status, 200);
+  assert.equal(h.status, 200, JSON.stringify(h.body));
   assert.deepEqual(h.body.blob, { configured: true, access: 'public' });
-  assert.ok(!JSON.stringify(h.body).includes(process.env.KV_REST_API_TOKEN));
+  const d = h.body.database;
+  assert.equal(d.provider, 'supabase-postgres');
+  assert.equal(d.reachable, true);
+  assert.equal(d.role, 'nsignage_api', 'queries run as the least-privilege role');
+  assert.equal(d.schema, true);
+  assert.equal(d.rlsOnAllTables, true);
+  assert.equal(d.roleBypassesRls, false);
+  const text = JSON.stringify(h.body);
+  assert.ok(!text.includes(process.env.DATABASE_URL), 'no connection string');
+  assert.ok(!/postgres:\/\//.test(text));
+});
+
+test('every query runs as nsignage_api under RLS, even with a more privileged connection URL', async () => {
+  // In local mode DATABASE_URL connects as the superuser "postgres"; the API must still switch role
+  const [r] = await db.asAnonymous((t) => t`select current_user as u, session_user as s,
+    (select count(*)::int from nsignage.users) as visible_users`);
+  assert.equal(r.u, 'nsignage_api');
+  assert.equal(r.visible_users, 0, 'no RLS context → no rows');
+  const [cu] = await db.asUser(crypto.randomUUID(), (t) => t`select count(*)::int as n from nsignage.devices`);
+  assert.equal(cu.n, 0, 'an unknown customer sees no devices');
 });
 
 export { ORIGIN };

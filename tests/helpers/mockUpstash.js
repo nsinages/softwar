@@ -1,6 +1,7 @@
-// In-memory server speaking the Upstash Redis REST protocol (the subset this
-// project uses). Lets the real @upstash/redis client and the real API handlers
-// run in tests without a network service.
+// In-memory server speaking the Upstash Redis REST protocol (the subset used by
+// the Redis → Supabase migration). Lets the real @upstash/redis client run in
+// tests without a network service. Records every command name it receives so
+// tests can prove the migration only READS from Redis.
 //   POST /            body ["CMD", ...args]        → { result }
 //   POST /pipeline    body [["CMD", ...], ...]     → [{ result }, ...]
 import http from 'node:http';
@@ -69,9 +70,21 @@ export function createStore() {
     zadd: (k, ...sm) => { const e = of(k, 'zset', () => new Map()); let n = 0; for (let i = 0; i < sm.length; i += 2) { if (!e.value.has(String(sm[i + 1]))) n += 1; e.value.set(String(sm[i + 1]), Number(sm[i])); } return n; },
     zscore: (k, m) => { const e = get(k, 'zset'); return e?.value.has(String(m)) ? String(e.value.get(String(m))) : null; },
     zrem: (k, ...ms) => { const e = get(k, 'zset'); if (!e) return 0; let n = 0; for (const m of ms) if (e.value.delete(String(m))) n += 1; return n; },
+    scan: (cursor, ...opts) => {
+      const o = opts.map(String);
+      const mi = o.findIndex((x) => x.toLowerCase() === 'match');
+      const pattern = mi >= 0 ? o[mi + 1] : '*';
+      const escaped = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+      const rx = new RegExp(`^${escaped}$`);
+      return ['0', [...data.keys()].filter((k) => live(k) && rx.test(k))];
+    },
     zrange: (k, start, stop, ...opts) => {
       const e = get(k, 'zset'); if (!e) return [];
       const items = sortedZ(e);
+      if (opts.map((o) => String(o).toLowerCase()).includes('withscores')) {
+        const [s, t] = rangeIdx(items.length, start, stop);
+        return items.slice(s, t + 1).flatMap(([m, sc]) => [m, String(sc)]);
+      }
       if (opts.map((o) => String(o).toLowerCase()).includes('byscore')) {
         return items.filter(([, s]) => s >= num(start) && s <= num(stop)).map(([m]) => m);
       }
@@ -93,14 +106,17 @@ export function createStore() {
     },
   };
 
+  const seen = [];
   function exec(command) {
     const [name, ...args] = command;
+    seen.push(String(name).toLowerCase());
     const fn = cmds[String(name).toLowerCase()];
     if (!fn) return { error: `ERR unknown command '${name}'` };
     try { return { result: fn(...args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))) }; } catch (err) { return { error: err.message }; }
   }
 
-  return { exec, data, dump: () => [...data.keys()].filter((k) => live(k)) };
+  const snapshot = () => JSON.stringify([...data.entries()].map(([k, e]) => [k, e.type, e.type === 'string' ? e.value : [...e.value]]).sort());
+  return { exec, data, seen, snapshot, dump: () => [...data.keys()].filter((k) => live(k)) };
 }
 
 export function startMockUpstash() {

@@ -1,27 +1,28 @@
 // =============================================
-// N Signage — Customer accounts, sessions and device ownership (cloud mode)
+// N Signage — Customer accounts, sessions and device ownership (Supabase)
 //
-// Accounts  : username + scrypt password hash (see password.js). No email.
+// Accounts  : nsignage.users — username + scrypt password hash (password.js).
+//             No email anywhere.
 // Sessions  : random 256-bit token in an HttpOnly, Secure, SameSite=Strict
-//             cookie ("__Host-ns_acct"). Only its SHA-256 is stored in Redis,
-//             with an absolute expiry. Every session is also listed under its
-//             account (ns:user-sess:<id>) so it can be revoked: logout, "sign
-//             out everywhere", password change and recovery.
-// Ownership : a Pi belongs to exactly one account (ns:dev-owner:<deviceId>).
+//             cookie ("__Host-ns_acct"); only its SHA-256 is stored, in
+//             nsignage.user_sessions, with an absolute expiry. Logout,
+//             "sign out everywhere", password change and recovery delete rows.
+// Ownership : nsignage.devices.owner_id — exactly one account per Pi; changed
+//             only by single-statement claims in the 'system' RLS context.
 //
-// Legacy    : before accounts, each browser had an anonymous "ns_session"
-//             cookie (ns:sess:<hash>) and the Pis it added (ns:owners,
-//             ns:browser-devs). That data is kept untouched and only read by
-//             the one-time "link my old devices" flow in api/devices.js.
+// Legacy    : pre-accounts browser sessions imported from Redis live in
+//             nsignage.legacy_browser_sessions / legacy_browser_devices and are
+//             only read by the one-time "link my old devices" flow.
 // =============================================
-import {
-  redis, keys, sha256, randomToken, httpError, getDevice, DEVICE_ID_RX, parse,
-} from './cloud.js';
+import { sha256, randomToken, httpError, DEVICE_ID_RX, deviceFromRow } from './cloud.js';
+import { asSystem, setContext, withContext, ms } from './db.js';
 
 const LEGACY_COOKIE = 'ns_session';
 const SESSION_DAYS = Math.min(90, Math.max(1, Number(process.env.NSIGNAGE_SESSION_DAYS) || 30));
 export const SESSION_TTL_S = SESSION_DAYS * 24 * 3600;
 const MAX_SESSIONS_PER_USER = 20;
+const LAST_SEEN_EVERY_MS = 10 * 60_000;
+export const MAX_DEVICES_PER_USER = 200;
 
 // ---- Cookies ---------------------------------------------------------------
 
@@ -42,9 +43,9 @@ function isLocalHost(req) {
   return /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host);
 }
 
-// "__Host-" cookies must be Secure, Path=/ and have no Domain, so they cannot
-// be set or overwritten by a sibling subdomain. Plain http://localhost cannot
-// use Secure, so local development uses the unprefixed name.
+// "__Host-" cookies must be Secure, Path=/ and have no Domain, so a sibling
+// subdomain cannot set or overwrite them. Plain http://localhost cannot use
+// Secure, so local development uses the unprefixed name.
 function accountCookieName(req) {
   return isLocalHost(req) ? 'ns_acct' : '__Host-ns_acct';
 }
@@ -60,24 +61,28 @@ function accountCookie(req, value, maxAge) {
   ].join('; ');
 }
 
-function validToken(token) {
-  return typeof token === 'string' && token.length >= 20 && token.length <= 200;
+const validToken = (t) => typeof t === 'string' && t.length >= 20 && t.length <= 200;
+
+function sessionHash(req) {
+  const token = readCookie(req, accountCookieName(req));
+  return validToken(token) ? sha256(token) : null;
 }
 
 // ---- Accounts ----------------------------------------------------------------
 
-export async function getUser(userId) {
-  if (typeof userId !== 'string' || userId.length > 64) return null;
-  return (await redis().get(keys.user(userId))) || null;
-}
-
-export async function getUserByUsername(username) {
-  const id = await redis().get(keys.username(username));
-  return id ? getUser(String(id)) : null;
-}
-
-export async function saveUser(user) {
-  await redis().set(keys.user(user.id), user);
+export function userFromRow(r) {
+  if (!r) return null;
+  return {
+    id: r.id,
+    username: r.username,
+    displayName: r.display_name || null,
+    passwordHash: r.password_hash,
+    recoveryHash: r.recovery_hash || null,
+    recoveryKeyCreatedAt: ms(r.recovery_created_at),
+    passwordChangedAt: ms(r.password_changed_at),
+    createdAt: ms(r.created_at),
+    disabled: Boolean(r.disabled),
+  };
 }
 
 export const userView = (u) => ({
@@ -89,83 +94,60 @@ export const userView = (u) => ({
   recoveryKeyCreatedAt: u.recoveryKeyCreatedAt || null,
 });
 
+export async function getUserByUsername(t, username) {
+  const [r] = await t`select * from nsignage.users where username = ${username}`;
+  return userFromRow(r);
+}
+
 // ---- Sessions ----------------------------------------------------------------
 
-export async function createSession(req, res, userId) {
-  const r = redis();
+/** Create a session inside transaction `t` (system context) and set the cookie. */
+export async function createSession(t, req, res, userId) {
   const token = randomToken();
-  const hash = sha256(token);
-  const now = Date.now();
   const ua = String(req.headers['user-agent'] || '').slice(0, 160);
-  await r.set(keys.userSession(hash), { userId, createdAt: now, expiresAt: now + SESSION_TTL_S * 1000, ua }, { ex: SESSION_TTL_S });
-  await r.sadd(keys.userSessions(userId), hash);
-  await r.expire(keys.userSessions(userId), SESSION_TTL_S);
-  await pruneSessions(userId);
+  await t`insert into nsignage.user_sessions (token_hash, user_id, expires_at, user_agent)
+          values (${sha256(token)}, ${userId}, now() + make_interval(secs => ${SESSION_TTL_S}), ${ua})`;
+  // Keep at most MAX_SESSIONS_PER_USER (oldest removed first)
+  await t`delete from nsignage.user_sessions
+          where user_id = ${userId}
+            and token_hash not in (select token_hash from nsignage.user_sessions where user_id = ${userId}
+                                   order by created_at desc limit ${MAX_SESSIONS_PER_USER})`;
   res.setHeader('Set-Cookie', accountCookie(req, token, SESSION_TTL_S));
-  return hash;
-}
-
-/** Drop index entries of expired sessions; cap the number of live sessions. */
-async function pruneSessions(userId) {
-  const r = redis();
-  const hashes = (await r.smembers(keys.userSessions(userId))) || [];
-  if (hashes.length <= 5) return;
-  const records = await r.mget(...hashes.map(keys.userSession));
-  const live = [];
-  for (let i = 0; i < hashes.length; i += 1) {
-    if (records[i]) live.push({ hash: hashes[i], createdAt: records[i].createdAt || 0 });
-    else await r.srem(keys.userSessions(userId), hashes[i]);
-  }
-  live.sort((a, b) => a.createdAt - b.createdAt);
-  while (live.length > MAX_SESSIONS_PER_USER) {
-    const oldest = live.shift();
-    await r.del(keys.userSession(oldest.hash));
-    await r.srem(keys.userSessions(userId), oldest.hash);
-  }
-}
-
-function sessionHash(req) {
-  const token = readCookie(req, accountCookieName(req));
-  return validToken(token) ? sha256(token) : null;
 }
 
 export async function destroySession(req, res) {
   const hash = sessionHash(req);
-  if (hash) {
-    const r = redis();
-    const s = await r.get(keys.userSession(hash));
-    await r.del(keys.userSession(hash));
-    if (s?.userId) await r.srem(keys.userSessions(s.userId), hash);
-  }
+  if (hash) await asSystem((t) => t`delete from nsignage.user_sessions where token_hash = ${hash}`);
   res.setHeader('Set-Cookie', accountCookie(req, '', 0));
 }
 
-/** Revoke every session of an account, optionally keeping one (the caller's). Returns the count revoked. */
-export async function revokeSessions(userId, keepHash = null) {
-  const r = redis();
-  const hashes = (await r.smembers(keys.userSessions(userId))) || [];
-  let n = 0;
-  for (const h of hashes) {
-    if (h === keepHash) continue;
-    await r.del(keys.userSession(h));
-    await r.srem(keys.userSessions(userId), h);
-    n += 1;
+/** Delete every session of an account except `keepHash`. Returns the number removed. */
+export async function revokeSessions(t, userId, keepHash = null) {
+  const rows = await t`delete from nsignage.user_sessions
+                       where user_id = ${userId} and token_hash <> ${keepHash || ''} returning 1`;
+  return rows.length;
+}
+
+/** Look up the session inside an open transaction (switches to the system context). */
+async function lookupSession(t, hash) {
+  await setContext(t, 'system');
+  const [r] = await t`
+    select s.token_hash, s.last_seen_at, u.*
+    from nsignage.user_sessions s join nsignage.users u on u.id = s.user_id
+    where s.token_hash = ${hash} and s.expires_at > now() and not u.disabled`;
+  if (!r) return null;
+  if (Date.now() - ms(r.last_seen_at) > LAST_SEEN_EVERY_MS) {
+    await t`update nsignage.user_sessions set last_seen_at = now() where token_hash = ${hash}`;
   }
-  return n;
+  return userFromRow(r);
 }
 
 /** { user, sessionHash } for the logged-in customer, or null. */
 export async function currentUser(req) {
   const hash = sessionHash(req);
   if (!hash) return null;
-  const session = await redis().get(keys.userSession(hash));
-  if (!session?.userId) return null;
-  if (session.expiresAt && Date.now() > session.expiresAt) return null;
-  const user = await getUser(session.userId);
-  if (!user || user.disabled) return null;
-  // Sessions created before the latest password change are no longer valid
-  if (user.sessionsValidAfter && session.createdAt < user.sessionsValidAfter) return null;
-  return { user, sessionHash: hash };
+  const user = await withContext('none', {}, (t) => lookupSession(t, hash));
+  return user ? { user, sessionHash: hash } : null;
 }
 
 export async function requireUser(req) {
@@ -174,70 +156,67 @@ export async function requireUser(req) {
   return cur;
 }
 
+/**
+ * Authenticate the customer and run `fn(t, { user, sessionHash })` in ONE
+ * transaction whose RLS context is that customer ('user').
+ */
+export async function withCustomer(req, fn) {
+  const hash = sessionHash(req);
+  if (!hash) throw httpError(401, 'Please log in again.', 'not-logged-in');
+  return withContext('none', {}, async (t) => {
+    const user = await lookupSession(t, hash);
+    if (!user) throw httpError(401, 'Please log in again.', 'not-logged-in');
+    await setContext(t, 'user', { user: user.id });
+    return fn(t, { user, sessionHash: hash });
+  });
+}
+
 // ---- Device ownership --------------------------------------------------------
 
-export async function userDeviceMeta(userId) {
-  const raw = (await redis().hgetall(keys.userDevices(userId))) || {};
-  const out = {};
-  for (const [id, v] of Object.entries(raw)) out[id] = parse(v);
-  return out;
-}
-
-export async function deviceOwnerId(deviceId) {
-  const v = await redis().get(keys.deviceOwner(deviceId));
-  return v ? String(v) : null;
-}
-
-/** Logged-in customer who owns this Pi, plus the Pi's latest state. */
-export async function requireOwnedDevice(req, deviceId) {
+/** A Pi owned by the current customer (RLS context 'user'), or 404. */
+export async function requireOwnedDevice(t, user, deviceId) {
   if (!DEVICE_ID_RX.test(deviceId || '')) throw httpError(400, 'Invalid device id');
-  const { user } = await requireUser(req);
-  if ((await deviceOwnerId(deviceId)) !== user.id) {
-    throw httpError(404, 'This Raspberry Pi is not registered to your account.', 'not-owner');
-  }
-  const device = await getDevice(deviceId);
-  if (!device) throw httpError(404, 'Raspberry Pi not found in the cloud');
-  return { user, device };
+  const [r] = await t`select * from nsignage.devices where id = ${deviceId} and owner_id = ${user.id}`;
+  if (!r) throw httpError(404, 'This Raspberry Pi is not registered to your account.', 'not-owner');
+  return deviceFromRow(r);
 }
-
-export const MAX_DEVICES_PER_USER = 200;
 
 /**
- * Link a Pi to an account. Atomic: SET NX on the owner key means two accounts
- * can never both own the same Pi. `via` records how ownership was proven.
+ * Link a Pi to an account, atomically: the UPDATE only succeeds while the Pi
+ * has no owner, so two accounts can never both own it. Runs in the 'system'
+ * context of the caller's transaction and switches back to 'user'.
  */
-export async function linkDevice(user, device, { name, location, via }) {
-  const r = redis();
-  const meta = await userDeviceMeta(user.id);
-  if (meta[device.deviceId]) throw httpError(409, 'This Raspberry Pi is already in your account.', 'duplicate');
-  if (Object.keys(meta).length >= MAX_DEVICES_PER_USER) throw httpError(409, 'Device limit reached for this account.');
-  const set = await r.set(keys.deviceOwner(device.deviceId), user.id, { nx: true });
-  if (set !== 'OK') {
-    const owner = await deviceOwnerId(device.deviceId);
-    if (owner !== user.id) {
-      throw httpError(409, 'This Raspberry Pi is registered to another account. The owner must remove it first.', 'owned-by-other');
-    }
+export async function linkDevice(t, user, deviceId, { name, location, via }) {
+  await setContext(t, 'system');
+  const [{ n }] = await t`select count(*)::int as n from nsignage.devices where owner_id = ${user.id}`;
+  if (n >= MAX_DEVICES_PER_USER) throw httpError(409, 'Device limit reached for this account.');
+  const [r] = await t`
+    update nsignage.devices
+       set owner_id = ${user.id}, added_at = now(), added_via = ${via},
+           nickname = left(coalesce(nullif(${name || ''}, ''), hostname, pi_username), 64),
+           location = nullif(${location || ''}, '')
+     where id = ${deviceId} and owner_id is null
+    returning *`;
+  if (!r) {
+    const [cur] = await t`select owner_id from nsignage.devices where id = ${deviceId}`;
+    if (!cur) throw httpError(404, 'Raspberry Pi not found in the cloud');
+    if (cur.owner_id === user.id) throw httpError(409, 'This Raspberry Pi is already in your account.', 'duplicate');
+    throw httpError(409, 'This Raspberry Pi is registered to another account. The owner must remove it first.', 'owned-by-other');
   }
-  const entry = { name: name || device.hostname || device.username, location: location || '', addedAt: Date.now(), via };
-  await r.hset(keys.userDevices(user.id), { [device.deviceId]: JSON.stringify(entry) });
-  console.log('[N-SIGNAGE CLOUD] device linked', JSON.stringify({ user: user.id, deviceId: device.deviceId, via }));
-  return entry;
+  await t`insert into nsignage.security_events (event, user_id, device_id, detail)
+          values ('device-linked', ${user.id}, ${deviceId}, ${t.json({ via })})`;
+  // back to the customer's own context for the rest of the request
+  await setContext(t, 'user', { user: user.id });
+  console.log('[N-SIGNAGE CLOUD] device linked', JSON.stringify({ user: user.id, deviceId, via }));
+  return deviceFromRow(r);
 }
 
 // ---- Legacy anonymous browser session (read-only) ------------------------------
 
-/** The pre-accounts browser id from the old "ns_session" cookie, or null. */
-export async function legacyBrowserId(req) {
+/** The pre-accounts browser id from the old "ns_session" cookie, or null. Needs 'system' context. */
+export async function legacyBrowserId(t, req) {
   const token = readCookie(req, LEGACY_COOKIE);
   if (!validToken(token)) return null;
-  const s = await redis().get(keys.session(sha256(token)));
-  // Only anonymous browser sessions ({ id }); ignore anything else stored there
-  return s?.id && !s.accountId ? String(s.id) : null;
-}
-
-export async function legacyBrowserDevices(browserId) {
-  const raw = (await redis().hgetall(keys.browserDevices(browserId))) || {};
-  const out = {};
-  for (const [id, v] of Object.entries(raw)) if (DEVICE_ID_RX.test(id)) out[id] = parse(v);
-  return out;
+  const [r] = await t`select browser_id from nsignage.legacy_browser_sessions where token_hash = ${sha256(token)}`;
+  return r ? r.browser_id : null;
 }

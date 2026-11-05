@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Database migration snapshots (contain password / device-secret hashes) and local env files
+.migration/
+.env
+.env.*
+!.env.example

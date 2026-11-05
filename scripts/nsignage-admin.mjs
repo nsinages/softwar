@@ -2,20 +2,20 @@
 // =============================================
 // N Signage — staff administration (runs on a staff computer, never on the website)
 //
-// Needs the production Redis credentials. Get them once with:
+// Needs DATABASE_URL (the nsignage_api pooler connection). Get it once with:
 //   npx vercel env pull .env.local        (file is git-ignored)
 // then:
-//   node scripts/nsignage-admin.mjs account <username>
-//   node scripts/nsignage-admin.mjs reset-recovery <username>   new recovery key + sign out everywhere
-//   node scripts/nsignage-admin.mjs revoke-sessions <username>
-//   node scripts/nsignage-admin.mjs disable <username> | enable <username>
-//   node scripts/nsignage-admin.mjs device <deviceId>           who owns a Pi
-//   node scripts/nsignage-admin.mjs unlink-device <deviceId>    remove a Pi from its account
+//   npm run admin -- account <username>
+//   npm run admin -- reset-recovery <username>   new recovery key + sign out everywhere
+//   npm run admin -- revoke-sessions <username>
+//   npm run admin -- disable <username> | enable <username>
+//   npm run admin -- device <deviceId>           who owns a Pi
+//   npm run admin -- unlink-device <deviceId>    remove a Pi from its account
 //
 // Password recovery without email: verify the customer OFFLINE first (see
-// docs/ACCOUNTS-AND-TRANSFERS.md §Recovery), then run reset-recovery and give
-// them the new key in person or by phone. They set a new password with it on
-// the website ("Forgot password?"). Staff never see or set passwords.
+// docs/SUPABASE-SETUP.md §Staff recovery), then run reset-recovery and give
+// them the new key in person or by phone. Staff never see or set passwords.
+// Every action is recorded in nsignage.security_events.
 // =============================================
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,81 +30,108 @@ function loadEnvFile(file) {
 }
 loadEnvFile(path.resolve('.env.local'));
 
-const { redis, keys, DEVICE_ID_RX } = await import('../api/_lib/cloud.js');
-const { getUserByUsername, saveUser, revokeSessions, deviceOwnerId, getUser } = await import('../api/_lib/auth.js');
+const { asSystem, closeDb } = await import('../api/_lib/db.js');
+const { revokeSessions } = await import('../api/_lib/auth.js');
 const { newRecoveryKey, hashRecoveryKey, normalizeUsername } = await import('../api/_lib/password.js');
 
+const DEVICE_ID_RX = /^[a-f0-9]{16}$/;
 const [cmd, arg] = process.argv.slice(2);
 const log = (...a) => console.log(...a);
-const fail = (msg) => { console.error(`Error: ${msg}`); process.exit(1); };
 const audit = (action, detail) => console.error(`[audit] ${new Date().toISOString()} ${action} ${JSON.stringify(detail)}`);
 
-async function userArg() {
-  const user = await getUserByUsername(normalizeUsername(arg));
-  if (!user) fail(`No account named "${arg}"`);
-  return user;
-}
+class Fail extends Error {}
 
-switch (cmd) {
-  case 'account': {
-    const u = await userArg();
-    const devices = Object.keys((await redis().hgetall(keys.userDevices(u.id))) || {});
-    const sessions = ((await redis().smembers(keys.userSessions(u.id))) || []).length;
-    log({
-      id: u.id, username: u.username, displayName: u.displayName, disabled: Boolean(u.disabled),
-      createdAt: new Date(u.createdAt).toISOString(),
-      passwordChangedAt: u.passwordChangedAt && new Date(u.passwordChangedAt).toISOString(),
-      devices, sessionsIndexed: sessions,
-    });
-    break;
+async function findUser(t) {
+  const [u] = await t`select * from nsignage.users where username = ${normalizeUsername(arg)}`;
+  if (!u) throw new Fail(`No account named "${arg}"`);
+  return u;
+}
+const event = (t, name, userId, detail, deviceId = null) =>
+  t`insert into nsignage.security_events (event, user_id, device_id, detail) values (${name}, ${userId}, ${deviceId}, ${t.json({ by: 'staff-admin-script', ...detail })})`;
+
+try {
+  switch (cmd) {
+    case 'account': {
+      const info = await asSystem(async (t) => {
+        const u = await findUser(t);
+        const devices = (await t`select id, nickname from nsignage.devices where owner_id = ${u.id}`).map((d) => `${d.id} (${d.nickname || '—'})`);
+        const [{ n }] = await t`select count(*)::int as n from nsignage.user_sessions where user_id = ${u.id} and expires_at > now()`;
+        return {
+          id: u.id, username: u.username, displayName: u.display_name, disabled: u.disabled,
+          createdAt: u.created_at.toISOString(), passwordChangedAt: u.password_changed_at.toISOString(),
+          devices, activeSessions: n,
+        };
+      });
+      log(info);
+      break;
+    }
+    case 'reset-recovery': {
+      const key = newRecoveryKey();
+      const r = await asSystem(async (t) => {
+        const u = await findUser(t);
+        await t`update nsignage.users set recovery_hash = ${hashRecoveryKey(key)}, recovery_created_at = now() where id = ${u.id}`;
+        const revoked = await revokeSessions(t, u.id);
+        await event(t, 'staff-reset-recovery', u.id, { revoked });
+        return { u, revoked };
+      });
+      audit('reset-recovery', { user: r.u.id, username: r.u.username, revokedSessions: r.revoked });
+      log(`New recovery key for "${r.u.username}" (give it to the customer; it is not stored in readable form):\n\n  ${key}\n`);
+      log(`${r.revoked} session(s) signed out. The customer now uses "Forgot password?" with this key.`);
+      break;
+    }
+    case 'revoke-sessions': {
+      const r = await asSystem(async (t) => {
+        const u = await findUser(t);
+        const revoked = await revokeSessions(t, u.id);
+        await event(t, 'staff-revoke-sessions', u.id, { revoked });
+        return { u, revoked };
+      });
+      audit('revoke-sessions', { user: r.u.id, revoked: r.revoked });
+      log(`${r.revoked} session(s) signed out.`);
+      break;
+    }
+    case 'disable':
+    case 'enable': {
+      const u = await asSystem(async (t) => {
+        const user = await findUser(t);
+        await t`update nsignage.users set disabled = ${cmd === 'disable'} where id = ${user.id}`;
+        if (cmd === 'disable') await revokeSessions(t, user.id);
+        await event(t, `staff-${cmd}`, user.id, {});
+        return user;
+      });
+      audit(cmd, { user: u.id });
+      log(`Account "${u.username}" ${cmd === 'disable' ? 'disabled and signed out' : 'enabled'}.`);
+      break;
+    }
+    case 'device': {
+      if (!DEVICE_ID_RX.test(arg || '')) throw new Fail('Device id must be 16 hex characters');
+      const [d] = await asSystem((t) => t`select d.id, d.last_seen_at, u.username from nsignage.devices d
+                                           left join nsignage.users u on u.id = d.owner_id where d.id = ${arg}`);
+      if (!d) throw new Fail('Unknown device id');
+      log({ deviceId: d.id, owner: d.username || null, lastSeen: d.last_seen_at.toISOString() });
+      break;
+    }
+    case 'unlink-device': {
+      if (!DEVICE_ID_RX.test(arg || '')) throw new Fail('Device id must be 16 hex characters');
+      const owner = await asSystem(async (t) => {
+        const [d] = await t`select owner_id from nsignage.devices where id = ${arg} for update`;
+        if (!d?.owner_id) throw new Fail('This Pi is not registered to any account');
+        await t`update nsignage.devices set owner_id = null, added_at = null, added_via = null, nickname = null, location = null
+                where id = ${arg}`;
+        await event(t, 'staff-unlink-device', d.owner_id, {}, arg);
+        return d.owner_id;
+      });
+      audit('unlink-device', { deviceId: arg, user: owner });
+      log('Removed from the account. Files on the Pi are not touched; the customer can add it again.');
+      break;
+    }
+    default:
+      log('Usage: npm run admin -- <account|reset-recovery|revoke-sessions|disable|enable|device|unlink-device> <username|deviceId>');
+      process.exitCode = cmd ? 1 : 0;
   }
-  case 'reset-recovery': {
-    const u = await userArg();
-    const key = newRecoveryKey();
-    u.recoveryHash = hashRecoveryKey(key);
-    u.recoveryKeyCreatedAt = Date.now();
-    await saveUser(u);
-    const revoked = await revokeSessions(u.id);
-    audit('reset-recovery', { user: u.id, username: u.username, revokedSessions: revoked });
-    log(`New recovery key for "${u.username}" (give it to the customer, it is not stored in readable form):\n\n  ${key}\n`);
-    log(`${revoked} session(s) signed out. The customer now uses "Forgot password?" with this key.`);
-    break;
-  }
-  case 'revoke-sessions': {
-    const u = await userArg();
-    const n = await revokeSessions(u.id);
-    audit('revoke-sessions', { user: u.id, revoked: n });
-    log(`${n} session(s) signed out.`);
-    break;
-  }
-  case 'disable':
-  case 'enable': {
-    const u = await userArg();
-    u.disabled = cmd === 'disable';
-    await saveUser(u);
-    if (u.disabled) await revokeSessions(u.id);
-    audit(cmd, { user: u.id });
-    log(`Account "${u.username}" ${u.disabled ? 'disabled and signed out' : 'enabled'}.`);
-    break;
-  }
-  case 'device': {
-    if (!DEVICE_ID_RX.test(arg || '')) fail('Device id must be 16 hex characters');
-    const owner = await deviceOwnerId(arg);
-    const u = owner ? await getUser(owner) : null;
-    log({ deviceId: arg, owner: u ? u.username : null });
-    break;
-  }
-  case 'unlink-device': {
-    if (!DEVICE_ID_RX.test(arg || '')) fail('Device id must be 16 hex characters');
-    const owner = await deviceOwnerId(arg);
-    if (!owner) fail('This Pi is not registered to any account');
-    await redis().hdel(keys.userDevices(owner), arg);
-    await redis().del(keys.deviceOwner(arg));
-    audit('unlink-device', { deviceId: arg, user: owner });
-    log('Removed from the account. Files on the Pi are not touched; the customer can add it again.');
-    break;
-  }
-  default:
-    log('Usage: node scripts/nsignage-admin.mjs <account|reset-recovery|revoke-sessions|disable|enable|device|unlink-device> <username|deviceId>');
-    process.exit(cmd ? 1 : 0);
+} catch (err) {
+  console.error(`Error: ${err instanceof Fail ? err.message : err.reason || err.message}`);
+  process.exitCode = 1;
+} finally {
+  await closeDb();
 }

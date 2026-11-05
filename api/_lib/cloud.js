@@ -12,20 +12,19 @@
 // "Find Pi" matches the browser and the Pi by the public IP address they
 // both use to reach the internet (same Wi-Fi → same router → same public IP).
 //
-// Storage (both added from the Vercel dashboard → Storage):
-//   - Upstash Redis  : browser sessions, device state, queues
-//   - Vercel Blob    : uploaded media files (the Pi downloads them from here)
+// Storage:
+//   - Supabase PostgreSQL : accounts, sessions, devices, ownership, pairing,
+//                           commands, transfer metadata (see db.js)
+//   - Vercel Blob         : TEMPORARY relay copies of media only
 // =============================================
 
 import crypto from 'node:crypto';
-import { Redis } from '@upstash/redis';
 
-export const ONLINE_WINDOW_MS = 45_000;          // seen within this → online
+export const ONLINE_WINDOW_MS = 60_000;          // seen within this → online (idle Pis sync every 15 s)
 export const NEARBY_WINDOW_MS = 2 * 60_000;      // Find Pi: Pi synced from this network within 2 min
-const NET_INDEX_TTL_S = 15 * 60;
-const COMMAND_TTL_S = 7 * 24 * 3600;
-const RESULT_TTL_S = 24 * 3600;
-const STALE_SECRET_MS = 10 * 60_000;             // Pi not added anywhere, offline this long, may re-register (reflash)
+export const IDLE_POLL_SECONDS = Math.min(60, Math.max(5, Number(process.env.NSIGNAGE_IDLE_POLL_SECONDS) || 15));
+export const BUSY_POLL_SECONDS = 2;
+const STALE_SECRET_MS = 10 * 60_000;             // unclaimed Pi offline this long may re-register (SD re-flash)
 
 export const USERNAME_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
 export const DEVICE_ID_RX = /^[a-f0-9]{16}$/;
@@ -33,70 +32,16 @@ const HOSTNAME_RX = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z
 const IPV4_RX = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 export const MEDIA_NAME_RX = /^[A-Za-z0-9][A-Za-z0-9._ ()-]{0,200}\.(jpg|jpeg|png|gif|webp|bmp|mp4|m4v|webm|mov|avi|mkv)$/i;
 
-let redisClient = null;
-export function redis() {
-  if (redisClient) return redisClient;
-  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) {
-    // Names only — never log the values.
-    console.error('[N-SIGNAGE CLOUD] Redis not configured: missing',
-      [!url && 'KV_REST_API_URL/UPSTASH_REDIS_REST_URL', !token && 'KV_REST_API_TOKEN/UPSTASH_REDIS_REST_TOKEN'].filter(Boolean).join(', '));
-    const err = new Error('Cloud storage is not configured. Connect an Upstash Redis store to this Vercel project.');
-    err.status = 503;
-    err.reason = 'cloud-not-configured';
-    throw err;
-  }
-  redisClient = new Redis({ url, token });
-  return redisClient;
-}
-
-export const keys = {
-  device: (id) => `ns:dev:${id}`,
-  net: (netKey) => `ns:net:${netKey}`,
-  commands: (id) => `ns:cmd:${id}`,
-  results: (id) => `ns:res:${id}`,
-  nonce: (n) => `ns:nonce:${n}`,
-  rate: (bucket, id) => `ns:rl:${bucket}:${id}`,
-
-  // Legacy (anonymous browser sessions, before customer accounts). Read-only
-  // except for the one-time "link my old devices" flow; never deleted in bulk.
-  owners: (id) => `ns:owners:${id}`,             // set of browser ids that added this Pi
-  session: (hash) => `ns:sess:${hash}`,
-  browserDevices: (id) => `ns:browser-devs:${id}`,
-  blobs: (id) => `ns:blob:${id}`,                // cloud copies made by the old upload flow
-
-  // Customer accounts (new prefixes: never collide with the short-lived
-  // email-account build b979de3, which used ns:acct / ns:owner / ns:sess)
-  user: (id) => `ns:user:${id}`,
-  username: (name) => `ns:username:${name}`,
-  userSession: (hash) => `ns:usess:${hash}`,
-  userSessions: (id) => `ns:user-sess:${id}`,    // set of session hashes, for revocation
-  userDevices: (id) => `ns:user-devs:${id}`,     // hash deviceId -> { name, location, addedAt, via }
-  deviceOwner: (id) => `ns:dev-owner:${id}`,     // deviceId -> userId (exactly one owner)
-  loginFail: (name) => `ns:login-fail:${name}`,
-
-  // Pairing codes shown on the Pi screen
-  pairCode: (hash) => `ns:pair:${hash}`,
-  pairDevice: (id) => `ns:pair-dev:${id}`,
-
-  // Relay transfers (metadata only — the media bytes live in Blob, transiently)
-  transfer: (id) => `ns:xfer:${id}`,
-  transferIndex: () => 'ns:xfer-expiry',         // zset transferId -> expiresAt
-  userTransfers: (id) => `ns:user-xfers:${id}`,  // zset transferId -> createdAt
-  transferProgress: (id) => `ns:xfer-prog:${id}`,
-};
-
 export const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 export const randomToken = () => crypto.randomBytes(32).toString('base64url');
+/** Short hash used as a rate-limit / log key (never store raw IPs or usernames there). */
+export const keyHash = (s) => sha256(`ns-key:${s || 'unknown'}`).slice(0, 32);
 
 export function safeEqual(a, b) {
   const x = Buffer.from(String(a));
   const y = Buffer.from(String(b));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
-
-export const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
 
 /** Find Pi (same-network) claiming; set NSIGNAGE_NETWORK_CLAIM=off once all Pis show pairing codes. */
 export const networkClaimEnabled = () => String(process.env.NSIGNAGE_NETWORK_CLAIM || 'on').toLowerCase() !== 'off';
@@ -152,13 +97,6 @@ export function handleError(res, err) {
   });
 }
 
-export function redisConfigured() {
-  return Boolean(
-    (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
-    (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN)
-  );
-}
-
 export function httpError(status, message, reason) {
   const err = new Error(message);
   err.status = status;
@@ -190,24 +128,42 @@ export function requireSameOrigin(req) {
   }
 }
 
-/** Fixed-window rate limit. Throws 429 when `limit` is exceeded within `windowS`. */
-export async function rateLimit(bucket, id, limit, windowS) {
-  const key = keys.rate(bucket, sha256(id || 'unknown').slice(0, 24));
-  const r = redis();
-  const n = await r.incr(key);
-  if (n === 1) await r.expire(key, windowS);
-  if (n > limit) {
-    const err = httpError(429, 'Too many attempts. Please wait a minute and try again.', 'rate-limited');
-    err.retryAfter = windowS;
-    throw err;
-  }
+export function bearerSecret(req) {
+  const auth = String(req.headers.authorization || '');
+  const secret = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  if (secret.length < 32 || secret.length > 200) throw httpError(401, 'Missing device secret');
+  return secret;
 }
 
 // ---- Device state ----------------------------------------------------------
 
-export async function getDevice(deviceId) {
-  if (!DEVICE_ID_RX.test(deviceId || '')) return null;
-  return (await redis().get(keys.device(deviceId))) || null;
+const ms = (d) => (d instanceof Date ? d.getTime() : d ? new Date(d).getTime() : null);
+
+/** nsignage.devices row → the device object used by the API code. */
+export function deviceFromRow(r) {
+  if (!r) return null;
+  return {
+    deviceId: r.id,
+    secretHash: r.secret_hash || null,
+    ownerId: r.owner_id || null,
+    nickname: r.nickname || '',
+    location: r.location || '',
+    addedAt: ms(r.added_at),
+    addedVia: r.added_via || null,
+    username: r.pi_username,
+    hostname: r.hostname || null,
+    localIp: r.local_ip || null,
+    port: r.api_port || 5000,
+    agentVersion: r.agent_version || null,
+    protocol: r.agent_protocol || 1,
+    capabilities: r.capabilities || [],
+    storage: r.storage_total_bytes ? { freeBytes: r.storage_free_bytes, totalBytes: r.storage_total_bytes } : null,
+    media: r.media || [],
+    mediaHash: r.media_hash || null,
+    currentMedia: r.current_media || null,
+    firstSeen: ms(r.first_seen_at),
+    lastSeen: ms(r.last_seen_at),
+  };
 }
 
 export function isOnline(device, now = Date.now()) {
@@ -217,37 +173,6 @@ export function isOnline(device, now = Date.now()) {
 export function canReplaceSecret(device, owned, now = Date.now()) {
   return !device?.secretHash || (!owned && now - (device.lastSeen || 0) > STALE_SECRET_MS);
 }
-
-/** True when a customer account owns the Pi, or (legacy) any browser added it. */
-export async function isDeviceClaimed(deviceId) {
-  const r = redis();
-  if (await r.get(keys.deviceOwner(deviceId))) return true;
-  return (await r.scard(keys.owners(deviceId))) > 0;
-}
-
-function bearerSecret(req) {
-  const auth = String(req.headers.authorization || '');
-  const secret = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  if (secret.length < 32 || secret.length > 200) throw httpError(401, 'Missing device secret');
-  return secret;
-}
-
-/**
- * Authenticate a Pi that has already registered (any Pi endpoint other than
- * the first sync). Returns the device record.
- */
-export async function authenticateDevice(req, deviceId) {
-  if (!DEVICE_ID_RX.test(deviceId || '')) throw httpError(400, 'Invalid device id');
-  const secret = bearerSecret(req);
-  const device = await getDevice(deviceId);
-  if (!device?.secretHash || !safeEqual(device.secretHash, sha256(secret))) {
-    console.warn('[N-SIGNAGE CLOUD] device auth failed', deviceId);
-    throw httpError(401, 'Device authentication failed', 'bad-device-secret');
-  }
-  return device;
-}
-
-export { bearerSecret };
 
 export function publicView(device, now = Date.now()) {
   return {
@@ -268,85 +193,6 @@ export function publicView(device, now = Date.now()) {
 
 export function hasCapability(device, name) {
   return Array.isArray(device?.capabilities) && device.capabilities.includes(name);
-}
-
-// ---- Commands --------------------------------------------------------------
-
-export async function enqueueCommand(deviceId, command) {
-  const cmd = { ...command, id: crypto.randomUUID(), createdAt: Date.now() };
-  const r = redis();
-  await r.rpush(keys.commands(deviceId), JSON.stringify(cmd));
-  await r.expire(keys.commands(deviceId), COMMAND_TTL_S);
-  const entry = { state: 'queued', at: Date.now(), ...(cmd.transferId && { transferId: cmd.transferId }) };
-  await r.hset(keys.results(deviceId), { [cmd.id]: JSON.stringify(entry) });
-  await r.expire(keys.results(deviceId), RESULT_TTL_S);
-  return cmd;
-}
-
-/** Remove a queued command (e.g. a cancelled transfer). True if it was still queued. */
-export async function removeCommand(deviceId, commandId) {
-  const r = redis();
-  const list = (await r.lrange(keys.commands(deviceId), 0, -1)) || [];
-  let removed = false;
-  for (const raw of list) {
-    if (parse(raw).id === commandId) {
-      await r.lrem(keys.commands(deviceId), 1, typeof raw === 'string' ? raw : JSON.stringify(raw));
-      removed = true;
-    }
-  }
-  return removed;
-}
-
-export async function pendingCommands(deviceId) {
-  const list = (await redis().lrange(keys.commands(deviceId), 0, 19)) || [];
-  return list.map(parse);
-}
-
-const SHA256_RX = /^[a-f0-9]{64}$/;
-
-/**
- * Record command results reported by a Pi. Returns the cleaned results, each
- * with the transferId it belongs to (if any), so transfers can be updated.
- */
-export async function completeCommands(deviceId, results) {
-  if (!Array.isArray(results) || results.length === 0) return [];
-  const r = redis();
-  const previous = (await r.hgetall(keys.results(deviceId))) || {};
-  const done = new Set();
-  const updates = {};
-  const cleaned = [];
-  for (const res of results.slice(0, 50)) {
-    if (!res || typeof res.id !== 'string' || res.id.length > 64) continue;
-    done.add(res.id);
-    const prev = previous[res.id] ? parse(previous[res.id]) : null;
-    const item = {
-      id: res.id,
-      ok: res.ok === true,
-      error: res.ok === true ? undefined : String(res.error || 'Failed on the Raspberry Pi').slice(0, 300),
-      reason: typeof res.reason === 'string' ? res.reason.slice(0, 40) : undefined,
-      filename: typeof res.filename === 'string' ? res.filename.slice(0, 220) : undefined,
-      // Only reported by agent protocol 2 (checksum verification on the Pi)
-      sha256: typeof res.sha256 === 'string' && SHA256_RX.test(res.sha256.toLowerCase()) ? res.sha256.toLowerCase() : undefined,
-      size: Number.isSafeInteger(res.size) && res.size >= 0 ? res.size : undefined,
-      transferId: prev?.transferId,
-    };
-    cleaned.push(item);
-    updates[res.id] = JSON.stringify({
-      state: item.ok ? 'done' : 'failed',
-      error: item.error,
-      filename: item.filename,
-      transferId: item.transferId,
-      at: Date.now(),
-    });
-  }
-  if (done.size === 0) return [];
-  await r.hset(keys.results(deviceId), updates);
-  const list = (await r.lrange(keys.commands(deviceId), 0, -1)) || [];
-  for (const raw of list) {
-    const cmd = parse(raw);
-    if (done.has(cmd.id)) await r.lrem(keys.commands(deviceId), 1, typeof raw === 'string' ? raw : JSON.stringify(raw));
-  }
-  return cleaned;
 }
 
 // Capabilities a Pi agent may announce (protocol 2+). Unknown values are dropped.
@@ -384,4 +230,23 @@ export function cleanReport(body) {
   return { username, hostname, localIp, port, media, currentMedia, agentVersion, protocol, capabilities, storage };
 }
 
-export const NET_TTL_S = NET_INDEX_TTL_S;
+const SHA256_RX = /^[a-f0-9]{64}$/;
+
+/** Validate command results reported by a Pi (agent 1.0 and protocol 2). */
+export function cleanResults(results) {
+  if (!Array.isArray(results)) return [];
+  const out = [];
+  for (const res of results.slice(0, 50)) {
+    if (!res || typeof res.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(res.id)) continue;
+    out.push({
+      id: res.id,
+      ok: res.ok === true,
+      error: res.ok === true ? null : String(res.error || 'Failed on the Raspberry Pi').slice(0, 300),
+      reason: typeof res.reason === 'string' ? res.reason.slice(0, 40) : null,
+      filename: typeof res.filename === 'string' ? res.filename.slice(0, 220) : null,
+      sha256: typeof res.sha256 === 'string' && SHA256_RX.test(res.sha256.toLowerCase()) ? res.sha256.toLowerCase() : null,
+      size: Number.isSafeInteger(res.size) && res.size >= 0 ? res.size : null,
+    });
+  }
+  return out;
+}

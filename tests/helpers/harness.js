@@ -1,19 +1,17 @@
 // Calls the real Vercel-style API handlers in-process, with a cookie jar per
 // simulated browser, a configurable client IP and an in-memory Blob backend.
+// Database: real PostgreSQL (see testDb.js).
 import crypto from 'node:crypto';
-import { startMockUpstash } from './mockUpstash.js';
+import { setupDatabase } from './testDb.js';
 
 export const HOST = 'software.nsinages.in';
 export const ORIGIN = `https://${HOST}`;
 
 export async function setupEnv() {
-  const upstash = await startMockUpstash();
-  process.env.KV_REST_API_URL = upstash.url;
-  process.env.KV_REST_API_TOKEN = 'test-token';
-  process.env.UPSTASH_DISABLE_TELEMETRY = '1';
+  const database = await setupDatabase();
   process.env.BLOB_READ_WRITE_TOKEN = `vercel_blob_rw_teststore123_${'x'.repeat(30)}`;
   process.env.CRON_SECRET = 'cron-secret-for-tests';
-  return upstash;
+  return database;
 }
 
 /** In-memory replacement for Vercel Blob. */

@@ -1,7 +1,9 @@
 # N-Signage — Supabase as the only primary database (design proposal)
 
-**Status: PROPOSAL, awaiting approval.** Nothing has been created in Supabase,
-nothing was deployed, and no Redis data was touched. The migration SQL is in
+**Status: APPROVED (Option A, Mumbai, Free for test / Pro for production) and
+IMPLEMENTED on branch `phase2-supabase`.** Setup, test results, migration report,
+deployment and rollback: [SUPABASE-SETUP.md](SUPABASE-SETUP.md). The text below
+is the original proposal, kept for reference. The migration SQL is in
 [`supabase/migrations/20261106000000_nsignage_init.sql`](../supabase/migrations/20261106000000_nsignage_init.sql)
 and was validated on PostgreSQL 17 (PGlite): **40/40 checks passed**. The
 checks cover constraints, Row Level Security isolation between customers and

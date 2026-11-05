@@ -1,39 +1,23 @@
 // /api/device?deviceId=<id>&action=<action> — manage a Pi through the cloud.
-// Every action needs the logged-in customer account that owns the Pi.
+// Every action needs the logged-in customer account that owns the Pi
+// (checked in SQL and enforced again by RLS in the 'user' context).
 //
-//   GET  action=status            last state reported by the Pi (heartbeat every ~5 s)
+//   GET  action=status            last state reported by the Pi (heartbeat)
 //   GET  action=media             media files the Pi reports it has (+ legacy preview URLs)
 //   POST action=command           { type: 'delete', filename }
 //   GET  action=result&id=<cmd>   progress of a queued command
 //
-// Uploads moved to /api/transfer (checksums, cancel/retry, relay copy deleted
-// after delivery). The old "download any blob URL" command was removed.
+// Uploads use /api/transfer (checksums, cancel/retry, relay copy deleted after delivery).
 import {
-  redis, keys, send, handleError, httpError, readJsonBody, requireSameOrigin,
-  isOnline, enqueueCommand, pendingCommands, parse, MEDIA_NAME_RX,
+  send, handleError, httpError, readJsonBody, requireSameOrigin, isOnline, MEDIA_NAME_RX,
 } from './_lib/cloud.js';
-import { requireOwnedDevice } from './_lib/auth.js';
-import { safeDelete } from './_lib/blobStore.js';
+import { withCustomer, requireOwnedDevice } from './_lib/auth.js';
+import { setContext } from './_lib/db.js';
+import { deleteRelayCopies } from './_lib/transfers.js';
 
-// filename on the Pi → blob URL, for files uploaded by the OLD cloud flow
-// (before transfers). New transfers keep no cloud copy once delivered.
-async function blobIndex(deviceId) {
-  const r = redis();
-  const [blobs, results] = await Promise.all([
-    r.hgetall(keys.blobs(deviceId)),
-    r.hgetall(keys.results(deviceId)),
-  ]);
-  const byName = {};
-  for (const [cmdId, raw] of Object.entries(blobs || {})) {
-    const b = parse(raw);
-    const result = results?.[cmdId] ? parse(results[cmdId]) : null;
-    const name = result?.state === 'done' && result.filename ? result.filename : null;
-    if (name) byName[name] = { cmdId, url: b.url };
-  }
-  return byName;
-}
+const CMD_ID_RX = /^[0-9a-f-]{36}$/i;
 
-async function statusAction(device) {
+function statusAction(device) {
   const online = isOnline(device);
   return {
     ok: online,
@@ -56,37 +40,24 @@ async function statusAction(device) {
   };
 }
 
-async function mediaAction(device) {
-  const index = await blobIndex(device.deviceId);
-  const pending = (await pendingCommands(device.deviceId))
-    .filter((c) => c.type === 'download')
-    .map((c) => ({ name: c.filename, pending: true, size: c.size || null, transferId: c.transferId || null }));
-  const media = (device.media || []).map((m) => ({ ...m, url: index[m.name]?.url || null }));
-  return { ok: true, online: isOnline(device), media, pending };
-}
-
-async function commandAction(device, body) {
-  const deviceId = device.deviceId;
-  if (body.type === 'delete') {
-    const filename = String(body.filename || '');
-    if (!MEDIA_NAME_RX.test(filename)) throw httpError(400, 'Invalid filename');
-    const cmd = await enqueueCommand(deviceId, { type: 'delete', filename });
-    // Remove the cloud copy too, if this file came through the cloud
-    const entry = (await blobIndex(deviceId))[filename];
-    if (entry) {
-      await redis().hdel(keys.blobs(deviceId), entry.cmdId);
-      await safeDelete(entry.url);
-    }
-    return { ok: true, command: cmd };
-  }
-  throw httpError(400, 'Unknown command');
-}
-
-async function resultAction(device, id) {
-  if (typeof id !== 'string' || id.length > 64) throw httpError(400, 'Invalid command id');
-  const raw = await redis().hget(keys.results(device.deviceId), id);
-  if (!raw) throw httpError(404, 'Command not found');
-  return { ok: true, online: isOnline(device), result: parse(raw) };
+async function mediaAction(t, device) {
+  const pending = await t`
+    select payload->>'filename' as name, (payload->>'size')::bigint as size, transfer_id
+    from nsignage.device_commands
+    where device_id = ${device.deviceId} and state = 'queued' and type = 'download'
+    order by created_at`;
+  // Previews only exist for files sent by the OLD flow (kept copies); new transfers keep none.
+  await setContext(t, 'system');
+  const legacy = await t`select filename, url from nsignage.legacy_relay_copies
+                         where device_id = ${device.deviceId} and deleted_at is null and filename is not null`;
+  const previews = Object.fromEntries(legacy.map((l) => [l.filename, l.url]));
+  const media = (device.media || []).map((m) => ({ ...m, url: previews[m.name] || null }));
+  return {
+    ok: true,
+    online: isOnline(device),
+    media,
+    pending: pending.map((p) => ({ name: p.name, pending: true, size: p.size || null, transferId: p.transfer_id || null })),
+  };
 }
 
 export default async function handler(req, res) {
@@ -95,18 +66,41 @@ export default async function handler(req, res) {
     if (action === 'upload') {
       throw httpError(410, 'Uploads now use /api/transfer. Please reload the page.', 'use-transfer-api');
     }
-
     const deviceId = String(req.query?.deviceId || '');
-    const { device } = await requireOwnedDevice(req, deviceId);
+    if (req.method === 'POST') requireSameOrigin(req);
+    let urls = [];
 
-    if (req.method === 'GET' && action === 'status') return send(res, 200, await statusAction(device));
-    if (req.method === 'GET' && action === 'media') return send(res, 200, await mediaAction(device));
-    if (req.method === 'GET' && action === 'result') return send(res, 200, await resultAction(device, req.query?.id));
-    if (req.method === 'POST' && action === 'command') {
-      requireSameOrigin(req);
-      return send(res, 200, await commandAction(device, readJsonBody(req)));
-    }
-    throw httpError(404, 'Unknown action');
+    const result = await withCustomer(req, async (t, { user }) => {
+      const device = await requireOwnedDevice(t, user, deviceId);
+      if (req.method === 'GET' && action === 'status') return statusAction(device);
+      if (req.method === 'GET' && action === 'media') return mediaAction(t, device);
+      if (req.method === 'GET' && action === 'result') {
+        const id = String(req.query?.id || '');
+        if (!CMD_ID_RX.test(id)) throw httpError(400, 'Invalid command id');
+        const [c] = await t`select state, error, result, created_at, completed_at from nsignage.device_commands
+                            where id = ${id} and device_id = ${deviceId}`;
+        if (!c) throw httpError(404, 'Command not found');
+        const state = c.state === 'withdrawn' ? 'failed' : c.state;
+        return { ok: true, online: isOnline(device), result: { state, error: c.error || undefined, filename: c.result?.filename, at: (c.completed_at || c.created_at).getTime() } };
+      }
+      if (req.method === 'POST' && action === 'command') {
+        const body = readJsonBody(req);
+        if (body.type !== 'delete') throw httpError(400, 'Unknown command');
+        const filename = String(body.filename || '');
+        if (!MEDIA_NAME_RX.test(filename)) throw httpError(400, 'Invalid filename');
+        // RLS (commands_owner) only allows commands for the customer's own Pi
+        const [cmd] = await t`insert into nsignage.device_commands (device_id, type, payload)
+                              values (${deviceId}, 'delete', ${t.json({ filename })}) returning id, created_at`;
+        // Remove the old cloud copy too, if this file came through the pre-transfer flow
+        await setContext(t, 'system');
+        urls = (await t`select url from nsignage.legacy_relay_copies
+                        where device_id = ${deviceId} and filename = ${filename} and deleted_at is null`).map((r) => r.url);
+        return { ok: true, command: { id: cmd.id, type: 'delete', filename, createdAt: cmd.created_at.getTime() } };
+      }
+      throw httpError(404, 'Unknown action');
+    });
+    if (urls.length) await deleteRelayCopies(urls);
+    send(res, 200, result);
   } catch (err) {
     handleError(res, err);
   }

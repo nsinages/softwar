@@ -12,17 +12,16 @@
 //   - Find Pi: the browser and the Pi share the same public network right now
 //     (single-use 3-minute nonce bound to this account and that network), or
 //   - pairing code: the customer can read the code on that display's screen.
-// Setting NSIGNAGE_NETWORK_CLAIM=off disables the Find Pi path once every Pi
-// can show pairing codes.
+// Every ownership change is ONE database transaction; claims are single
+// UPDATE … WHERE owner_id IS NULL statements, so a Pi can never get two owners.
 import {
-  redis, keys, send, handleError, httpError, readJsonBody, requireSameOrigin, rateLimit,
-  clientIp, networkKey, getDevice, publicView, parse, NEARBY_WINDOW_MS, DEVICE_ID_RX, networkClaimEnabled,
+  send, handleError, httpError, readJsonBody, requireSameOrigin, clientIp, networkKey, publicView, sha256, keyHash,
+  NEARBY_WINDOW_MS, DEVICE_ID_RX, networkClaimEnabled, deviceFromRow,
 } from './_lib/cloud.js';
-import {
-  requireUser, userDeviceMeta, deviceOwnerId, linkDevice, legacyBrowserId, legacyBrowserDevices,
-} from './_lib/auth.js';
+import { withCustomer, requireUser, linkDevice, legacyBrowserId, requireOwnedDevice } from './_lib/auth.js';
+import { setContext, rateLimit } from './_lib/db.js';
 import { redeemPairCode } from './_lib/pairing.js';
-import { cancelDeviceTransfers, deleteLegacyBlobs } from './_lib/transfers.js';
+import { cancelDeviceTransfers, deleteRelayCopies } from './_lib/transfers.js';
 
 const NONCE_RX = /^[A-Za-z0-9_-]{20,100}$/;
 
@@ -30,200 +29,193 @@ function cleanText(v, max) {
   return typeof v === 'string' ? v.replace(/\p{Cc}/gu, '').trim().slice(0, max) : '';
 }
 
-function view(device, meta, now) {
+function view(device, now = Date.now()) {
   return {
     ...publicView(device, now),
-    name: meta?.name || '',
-    location: meta?.location || '',
-    addedAt: meta?.addedAt || null,
-    via: meta?.via || null,
+    name: device.nickname || '',
+    location: device.location || '',
+    addedAt: device.addedAt || null,
+    via: device.addedVia || null,
   };
 }
 
-async function list(user) {
-  const meta = await userDeviceMeta(user.id);
-  const ids = Object.keys(meta).filter((id) => DEVICE_ID_RX.test(id));
-  const records = ids.length ? await redis().mget(...ids.map(keys.device)) : [];
+async function list(t, user) {
+  const rows = await t`select * from nsignage.devices where owner_id = ${user.id} order by added_at`;
   const now = Date.now();
-  const devices = ids
-    .map((id, i) => (records[i] ? view(records[i], meta[id], now) : null))
-    .filter(Boolean)
-    .sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
-  return { ok: true, devices, networkClaim: networkClaimEnabled() };
+  return { ok: true, devices: rows.map((r) => view(deviceFromRow(r), now)), networkClaim: networkClaimEnabled() };
 }
 
-/** Did this Pi sync from the caller's public network within the last 2 minutes? */
-async function onSameNetwork(req, deviceId) {
+/** Did this Pi sync from the caller's public network within the last 2 minutes? (system context) */
+async function onSameNetwork(t, req, deviceId) {
   const net = networkKey(clientIp(req));
   if (!net) return false;
-  const score = await redis().zscore(keys.net(net), deviceId);
-  return score !== null && score !== undefined && Date.now() - Number(score) <= NEARBY_WINDOW_MS;
+  const [r] = await t`select 1 from nsignage.device_network_sightings
+                      where device_id = ${deviceId} and net_key = ${net}
+                        and seen_at > now() - make_interval(secs => ${NEARBY_WINDOW_MS / 1000})`;
+  return Boolean(r);
 }
 
-async function claimByNonce(req, user, body) {
+async function claimByNonce(t, req, user, body) {
   if (!networkClaimEnabled()) {
     throw httpError(403, 'Use the pairing code shown on the display to add it.', 'network-claim-disabled');
   }
-  await rateLimit('claim', user.id, 20, 600);
   const nonce = String(body.claimNonce || '');
   if (!NONCE_RX.test(nonce)) throw httpError(400, 'Click "Find Pi" first, then Add Device.', 'missing-nonce');
-
-  const grant = await redis().getdel(keys.nonce(nonce)); // single use
-  if (!grant || grant.userId !== user.id) {
+  await setContext(t, 'system');
+  // single use: the row is deleted as it is read
+  const [grant] = await t`delete from nsignage.claim_nonces
+                          where nonce_hash = ${sha256(nonce)} and expires_at > now() returning *`;
+  if (!grant || grant.user_id !== user.id) {
     throw httpError(410, 'This search result has expired. Click "Find Pi" again.', 'nonce-expired');
   }
-  if (grant.net !== networkKey(clientIp(req))) {
+  if (grant.net_key !== networkKey(clientIp(req))) {
     throw httpError(403, 'Your network changed since the search. Connect to the same Wi-Fi as the Pi and click "Find Pi" again.', 'network-changed');
   }
-  const device = await getDevice(grant.deviceId);
-  if (!device || Date.now() - (device.lastSeen || 0) > NEARBY_WINDOW_MS) {
+  const [d] = await t`select last_seen_at from nsignage.devices where id = ${grant.device_id}`;
+  if (!d || Date.now() - d.last_seen_at.getTime() > NEARBY_WINDOW_MS) {
     throw httpError(409, 'The Raspberry Pi went offline. Check its power and Wi-Fi, then click "Find Pi" again.', 'pi-offline');
   }
-  const entry = await linkDevice(user, device, {
+  const device = await linkDevice(t, user, grant.device_id, {
     name: cleanText(body.name, 64), location: cleanText(body.location, 80), via: 'network',
   });
-  return { ok: true, device: view(device, entry, Date.now()) };
+  return { ok: true, device: view(device) };
 }
 
-async function claimByCode(req, user, body) {
-  await rateLimit('pair-ip', clientIp(req), 20, 600);
-  await rateLimit('pair-user', user.id, 10, 600);
-  const deviceId = await redeemPairCode(body.code);
-  const device = await getDevice(deviceId);
-  if (!device) throw httpError(404, 'Raspberry Pi not found in the cloud');
-  const entry = await linkDevice(user, device, {
+async function claimByCode(t, user, body) {
+  await setContext(t, 'system');
+  const deviceId = await redeemPairCode(t, body.code, user.id);
+  const device = await linkDevice(t, user, deviceId, {
     name: cleanText(body.name, 64), location: cleanText(body.location, 80), via: 'pairing-code',
   });
-  return { ok: true, device: view(device, entry, Date.now()) };
+  return { ok: true, device: view(device) };
 }
 
 // ---- One-time link of devices added before accounts existed --------------------
 
-async function legacyList(req, user) {
-  const browserId = await legacyBrowserId(req);
+async function legacyList(t, req, user) {
+  await setContext(t, 'system');
+  const browserId = await legacyBrowserId(t, req);
   if (!browserId) return { ok: true, available: false, devices: [] };
-  const meta = await legacyBrowserDevices(browserId);
-  const ids = Object.keys(meta).slice(0, 100);
-  const r = redis();
+  const rows = await t`
+    select l.device_id, l.name, l.location, d.owner_id, d.hostname, d.pi_username, d.last_seen_at, d.capabilities
+    from nsignage.legacy_browser_devices l join nsignage.devices d on d.id = l.device_id
+    where l.browser_id = ${browserId}
+    order by l.added_at nulls last
+    limit 100`;
   const now = Date.now();
   const devices = [];
-  for (const id of ids) {
-    const device = await getDevice(id);
-    const owner = await deviceOwnerId(id);
-    const inBrowser = await r.sismember(keys.owners(id), browserId);
-    let status;
-    if (owner === user.id) status = 'linked';
-    else if (owner) status = 'other-account';
-    else if (!device) status = 'missing';
-    else if (!inBrowser) status = 'removed';
-    else status = 'linkable';
+  for (const r of rows) {
+    const status = r.owner_id === user.id ? 'linked' : r.owner_id ? 'other-account' : 'linkable';
     devices.push({
-      deviceId: id,
-      name: meta[id]?.name || device?.hostname || '',
-      location: meta[id]?.location || '',
-      hostname: device?.hostname || null,
-      username: device?.username || null,
-      online: device ? publicView(device, now).online : false,
+      deviceId: r.device_id,
+      name: r.name || r.hostname || '',
+      location: r.location || '',
+      hostname: r.hostname || null,
+      username: r.pi_username,
+      online: now - r.last_seen_at.getTime() < 60_000,
       status,
-      sameNetwork: status === 'linkable' ? await onSameNetwork(req, id) : false,
-      pairingSupported: Array.isArray(device?.capabilities) && device.capabilities.includes('pairing'),
+      sameNetwork: status === 'linkable' ? await onSameNetwork(t, req, r.device_id) : false,
+      pairingSupported: (r.capabilities || []).includes('pairing'),
     });
   }
   return { ok: true, available: true, devices };
 }
 
-async function linkLegacy(req, user, body) {
-  await rateLimit('link-legacy', user.id, 30, 600);
+async function linkLegacy(t, req, user, body) {
   const deviceId = String(body.deviceId || '');
   if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
-  const browserId = await legacyBrowserId(req);
+  await setContext(t, 'system');
+  const browserId = await legacyBrowserId(t, req);
   if (!browserId) {
     throw httpError(403, 'Open this website in the browser you used before accounts existed to link its devices.', 'no-legacy-session');
   }
   // 1. This browser really added the Pi under the old system
-  if (!(await redis().sismember(keys.owners(deviceId), browserId))) {
-    throw httpError(404, 'This Raspberry Pi was not added in this browser.', 'not-legacy-owner');
-  }
-  const device = await getDevice(deviceId);
-  if (!device) throw httpError(404, 'Raspberry Pi not found in the cloud');
+  const [legacy] = await t`select name, location from nsignage.legacy_browser_devices
+                           where browser_id = ${browserId} and device_id = ${deviceId}`;
+  if (!legacy) throw httpError(404, 'This Raspberry Pi was not added in this browser.', 'not-legacy-owner');
   // 2. A second, current proof of control: pairing code, or being on the Pi's network now
   let via;
   if (body.code) {
-    await rateLimit('pair-user', user.id, 10, 600);
-    await redeemPairCode(body.code, deviceId);
+    await redeemPairCode(t, body.code, user.id, deviceId);
     via = 'legacy+pairing-code';
-  } else if (await onSameNetwork(req, deviceId)) {
+  } else if (await onSameNetwork(t, req, deviceId)) {
     via = 'legacy+network';
   } else {
     throw httpError(403, 'To confirm this display is yours, connect this phone or computer to the same Wi-Fi as the display (or enter the pairing code shown on it), then try again.', 'verify-required');
   }
-  const meta = (await legacyBrowserDevices(browserId))[deviceId] || {};
-  const entry = await linkDevice(user, device, { name: meta.name || '', location: meta.location || '', via });
-  return { ok: true, device: view(device, entry, Date.now()) };
+  const device = await linkDevice(t, user, deviceId, { name: legacy.name || '', location: legacy.location || '', via });
+  return { ok: true, device: view(device) };
 }
 
 // ---- Rename / unregister ---------------------------------------------------------
 
-async function ownedMeta(user, deviceId) {
-  if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
-  const raw = await redis().hget(keys.userDevices(user.id), deviceId);
-  if (!raw || (await deviceOwnerId(deviceId)) !== user.id) {
-    throw httpError(404, 'This Raspberry Pi is not registered to your account.', 'not-owner');
-  }
-  return parse(raw);
-}
-
-async function rename(req, user, deviceId) {
-  const meta = await ownedMeta(user, deviceId);
+async function rename(t, req, user, deviceId) {
+  const current = await requireOwnedDevice(t, user, deviceId);
   const body = readJsonBody(req);
-  const entry = {
-    ...meta,
-    ...(body.name !== undefined && { name: cleanText(body.name, 64) || meta.name }),
-    ...(body.location !== undefined && { location: cleanText(body.location, 80) }),
-  };
-  await redis().hset(keys.userDevices(user.id), { [deviceId]: JSON.stringify(entry) });
-  const device = await getDevice(deviceId);
-  return { ok: true, device: device ? view(device, entry, Date.now()) : null };
+  const name = body.name !== undefined ? cleanText(body.name, 64) || current.nickname : current.nickname;
+  const location = body.location !== undefined ? cleanText(body.location, 80) : current.location;
+  // RLS + guard trigger: a customer can only change nickname/location of their own Pi
+  const [r] = await t`update nsignage.devices set nickname = ${name || null}, location = ${location || null}
+                      where id = ${deviceId} and owner_id = ${user.id} returning *`;
+  return { ok: true, device: view(deviceFromRow(r)) };
 }
 
-async function remove(user, deviceId) {
-  await ownedMeta(user, deviceId);
-  const r = redis();
-  await r.hdel(keys.userDevices(user.id), deviceId);
-  await r.del(keys.deviceOwner(deviceId));
-  // The account owner's explicit removal also ends the old anonymous-browser
-  // association, so the Pi is fully unclaimed and can be added again.
-  await r.del(keys.owners(deviceId));
-  const cancelled = await cancelDeviceTransfers(user.id, deviceId, 'Device removed from the account');
-
-  // Let the Pi register a fresh secret (SD card re-flash) and drop cloud-side
-  // queues and any old cloud media copies. Files on the Pi are NOT deleted.
-  const device = await getDevice(deviceId);
-  if (device) await r.set(keys.device(deviceId), { ...device, secretHash: null });
-  await deleteLegacyBlobs(deviceId);
-  await r.del(keys.commands(deviceId), keys.results(deviceId), keys.pairDevice(deviceId));
-  console.log('[N-SIGNAGE CLOUD] device removed', JSON.stringify({ user: user.id, deviceId, cancelledTransfers: cancelled }));
-  return { ok: true };
+async function remove(t, user, deviceId) {
+  await requireOwnedDevice(t, user, deviceId);
+  await setContext(t, 'system');
+  const urls = await cancelDeviceTransfers(t, deviceId, 'Device removed from the account');
+  await t`update nsignage.device_commands set state = 'withdrawn' where device_id = ${deviceId} and state = 'queued'`;
+  await t`delete from nsignage.pairing_codes where device_id = ${deviceId}`;
+  await t`delete from nsignage.legacy_browser_devices where device_id = ${deviceId}`;
+  const legacy = await t`select url from nsignage.legacy_relay_copies where device_id = ${deviceId} and deleted_at is null`;
+  // Unclaim, and let the Pi register a fresh secret (SD card re-flash). Files on the Pi are NOT deleted.
+  const [r] = await t`update nsignage.devices
+                      set owner_id = null, added_at = null, added_via = null, nickname = null, location = null, secret_hash = null
+                      where id = ${deviceId} and owner_id = ${user.id} returning id`;
+  if (!r) throw httpError(404, 'This Raspberry Pi is not registered to your account.', 'not-owner');
+  await t`insert into nsignage.security_events (event, user_id, device_id) values ('device-removed', ${user.id}, ${deviceId})`;
+  console.log('[N-SIGNAGE CLOUD] device removed', JSON.stringify({ user: user.id, deviceId }));
+  return { result: { ok: true }, urls: [...urls, ...legacy.map((x) => x.url)] };
 }
 
 export default async function handler(req, res) {
   try {
-    const { user } = await requireUser(req);
     const action = String(req.query?.action || '');
-    if (req.method === 'GET' && action === 'legacy') return send(res, 200, await legacyList(req, user));
-    if (req.method === 'GET') return send(res, 200, await list(user));
-    requireSameOrigin(req);
     const deviceId = String(req.query?.deviceId || '');
-    if (req.method === 'POST') {
-      const body = readJsonBody(req);
-      if (action === 'pair') return send(res, 200, await claimByCode(req, user, body));
-      if (action === 'link-legacy') return send(res, 200, await linkLegacy(req, user, body));
-      if (!action) return send(res, 200, await claimByNonce(req, user, body));
-      throw httpError(404, 'Unknown action');
+    if (req.method !== 'GET') requireSameOrigin(req);
+    const body = req.method === 'POST' ? readJsonBody(req) : {};
+
+    // Rate limits run in their own committed transactions BEFORE the main one:
+    // a failed claim must not roll them back, and nesting would hold two connections.
+    const claiming = req.method === 'POST' && ['pair', 'link-legacy', ''].includes(action);
+    if (claiming) {
+      const { user } = await requireUser(req);
+      const usesCode = action === 'pair' || Boolean(body.code);
+      if (usesCode) await rateLimit('pair-ip', keyHash(clientIp(req)), 20, 600);
+      const [bucket, limit] = usesCode ? ['pair-user', 10] : action === 'link-legacy' ? ['link-legacy', 30] : ['claim', 20];
+      await rateLimit(bucket, keyHash(user.id), limit, 600);
     }
-    if (req.method === 'PATCH') return send(res, 200, await rename(req, user, deviceId));
-    if (req.method === 'DELETE') return send(res, 200, await remove(user, deviceId));
-    throw httpError(405, 'Method not allowed');
+
+    let urls = [];
+    const result = await withCustomer(req, async (t, { user }) => {
+      if (req.method === 'GET' && action === 'legacy') return legacyList(t, req, user);
+      if (req.method === 'GET') return list(t, user);
+      if (req.method === 'POST') {
+        if (action === 'pair') return claimByCode(t, user, body);
+        if (action === 'link-legacy') return linkLegacy(t, req, user, body);
+        if (!action) return claimByNonce(t, req, user, body);
+        throw httpError(404, 'Unknown action');
+      }
+      if (req.method === 'PATCH') return rename(t, req, user, deviceId);
+      if (req.method === 'DELETE') {
+        const r = await remove(t, user, deviceId);
+        urls = r.urls;
+        return r.result;
+      }
+      throw httpError(405, 'Method not allowed');
+    });
+    if (urls.length) await deleteRelayCopies(urls); // after the commit
+    send(res, 200, result);
   } catch (err) {
     handleError(res, err);
   }

@@ -39,7 +39,9 @@ Browser ──► /api/auth      username + password accounts (no email), recove
 Media goes browser → cloud relay (temporary copy) → Pi. It is a relay, not
 peer-to-peer, and it is stored only on the Pi.
 
-- Accounts, pairing, transfers, staff recovery, env vars, deploy and rollback:
+- **Database (Supabase PostgreSQL), setup, env vars, Preview, deploy, rollback, migration:**
+  [docs/SUPABASE-SETUP.md](docs/SUPABASE-SETUP.md)
+- Accounts, pairing, transfers and staff recovery (behaviour and API):
   [docs/ACCOUNTS-AND-TRANSFERS.md](docs/ACCOUNTS-AND-TRANSFERS.md)
 - What the next Pi software update must implement:
   [docs/PI-AGENT-V2-CONTRACT.md](docs/PI-AGENT-V2-CONTRACT.md)
@@ -48,8 +50,9 @@ peer-to-peer, and it is stored only on the Pi.
 
 Quick version:
 
-1. Vercel → Storage: connect **Upstash Redis** and a **public Blob** store; add a
-   `CRON_SECRET` environment variable; redeploy.
+1. Create a Supabase project in Mumbai and run `npm run db:setup` (see
+   docs/SUPABASE-SETUP.md); in Vercel set `DATABASE_URL`, `CRON_SECRET` and
+   connect a **public Blob** store (temporary media relay only); redeploy.
    `curl https://software.nsinages.in/api/health` → `"ok":true`.
 2. On each Pi, in the N-Signage folder: `sudo ./install-cloud-agent.sh`
    (detects the Linux user and folder; `--uninstall` to roll back).
@@ -94,7 +97,8 @@ Without a key, anyone on the network can upload or delete media on the Pis
 npm install
 npm run dev        # http://localhost:5173 (same proxy + discovery as production)
 npm run lint
-npm test           # API, Pi agent 1.0 compatibility (needs Python 3), checksum utils
+npm test           # PostgreSQL (in-process) API + RLS + migration tests, Pi agent 1.0 (needs Python 3)
+npm run test:supabase   # same API tests against a real Supabase TEST project
 ```
 
 ## Security notes
