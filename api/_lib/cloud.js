@@ -2,24 +2,30 @@
 // N Signage — Cloud relay shared helpers (Vercel serverless functions)
 //
 // The website is hosted in the cloud, so it can never open a connection to a
-// Raspberry Pi on a customer's Wi-Fi. Instead every Pi runs cloud_agent.py,
-// which connects OUT to this relay every few seconds ("sync"):
+// Raspberry Pi on a customer's Wi-Fi (browsers cannot send UDP/mDNS, and an
+// HTTPS page cannot call http://192.168.x.x). Instead every Pi runs
+// cloud_agent.py, which connects OUT to this relay every few seconds ("sync"):
 //   - reports its identity, local IP and media list
 //   - picks up queued commands (download a file, delete a file)
 //   - reports the results of commands it ran
 //
+// "Find Pi" matches the browser and the Pi by the public IP address they
+// both use to reach the internet (same Wi-Fi → same router → same public IP).
+//
 // Storage (both added from the Vercel dashboard → Storage):
-//   - Upstash Redis  : device state, pairings, command queues
+//   - Upstash Redis  : accounts, sessions, device state, ownership, queues
 //   - Vercel Blob    : uploaded media files (the Pi downloads them from here)
 // =============================================
 
 import crypto from 'node:crypto';
 import { Redis } from '@upstash/redis';
 
-export const ONLINE_WINDOW_MS = 45_000;        // seen within this → online
-export const NEARBY_IP_WINDOW_MS = 15 * 60_000; // public IPs remembered for pairing
+export const ONLINE_WINDOW_MS = 45_000;          // seen within this → online
+export const NEARBY_WINDOW_MS = 2 * 60_000;      // Find Pi: Pi synced from this network within 2 min
+const NET_INDEX_TTL_S = 15 * 60;
 const COMMAND_TTL_S = 7 * 24 * 3600;
 const RESULT_TTL_S = 24 * 3600;
+const STALE_SECRET_MS = 10 * 60_000;             // unowned Pi offline this long may re-register (reflash)
 
 export const USERNAME_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
 export const DEVICE_ID_RX = /^[a-f0-9]{16}$/;
@@ -47,11 +53,17 @@ export function redis() {
 
 export const keys = {
   device: (id) => `ns:dev:${id}`,
-  user: (username) => `ns:user:${username.toLowerCase()}`,
-  controllers: (id) => `ns:ctl:${id}`,
+  net: (netKey) => `ns:net:${netKey}`,
+  owner: (id) => `ns:owner:${id}`,
   commands: (id) => `ns:cmd:${id}`,
   results: (id) => `ns:res:${id}`,
   blobs: (id) => `ns:blob:${id}`,
+  account: (id) => `ns:acct:${id}`,
+  email: (email) => `ns:email:${email}`,
+  session: (hash) => `ns:sess:${hash}`,
+  accountDevices: (id) => `ns:acct-devs:${id}`,
+  nonce: (n) => `ns:nonce:${n}`,
+  rate: (bucket, id) => `ns:rl:${bucket}:${id}`,
 };
 
 export const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -63,6 +75,10 @@ export function safeEqual(a, b) {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
+export const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+
+// ---- Network matching ------------------------------------------------------
+
 // Public IP of the caller as seen by Vercel's edge.
 export function clientIp(req) {
   const real = req.headers['x-real-ip'];
@@ -71,34 +87,40 @@ export function clientIp(req) {
   return ip.trim().toLowerCase();
 }
 
-// Same network = same public IPv4 (NAT), or same IPv6 /64 prefix.
 function ipv6Prefix64(ip) {
   if (!ip.includes(':')) return null;
-  let [head, tail] = ip.split('::');
+  const [head, tail] = ip.split('::');
   const h = head ? head.split(':') : [];
   const t = tail !== undefined && tail ? tail.split(':') : [];
   const full = tail === undefined ? h : [...h, ...Array(8 - h.length - t.length).fill('0'), ...t];
   if (full.length !== 8) return null;
-  return full.slice(0, 4).map((g) => parseInt(g || '0', 16)).join(':');
+  return full.slice(0, 4).map((g) => parseInt(g || '0', 16).toString(16)).join(':');
 }
 
-export function sameNetwork(a, b) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  const pa = ipv6Prefix64(a);
-  return pa !== null && pa === ipv6Prefix64(b);
+/** Same network = same public IPv4 (NAT), or same IPv6 /64 prefix. */
+export function networkKey(ip) {
+  if (!ip) return null;
+  const v4mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (v4mapped) return v4mapped[1];
+  if (IPV4_RX.test(ip)) return ip;
+  const p = ipv6Prefix64(ip);
+  return p ? `${p}::/64` : null;
 }
+
+// ---- HTTP helpers ----------------------------------------------------------
 
 export function send(res, status, body) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.end(JSON.stringify(body));
 }
 
 export function handleError(res, err) {
   const status = err.status || 500;
   if (status >= 500) console.error('[N-SIGNAGE CLOUD]', status, err.reason || '', err.message);
+  if (err.retryAfter) res.setHeader('Retry-After', String(err.retryAfter));
   send(res, status, {
     ok: false,
     error: status >= 500 && !err.status ? 'Cloud server error' : err.message,
@@ -113,9 +135,10 @@ export function redisConfigured() {
   );
 }
 
-export function httpError(status, message) {
+export function httpError(status, message, reason) {
   const err = new Error(message);
   err.status = status;
+  if (reason) err.reason = reason;
   return err;
 }
 
@@ -126,6 +149,34 @@ export function readJsonBody(req) {
     try { return JSON.parse(b); } catch { throw httpError(400, 'Invalid JSON body'); }
   }
   return {};
+}
+
+/**
+ * Browser requests that change state must come from this website itself
+ * (blocks cross-site form posts / CSRF together with SameSite cookies).
+ */
+export function requireSameOrigin(req) {
+  const origin = req.headers.origin;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if (typeof origin !== 'string' || !host) throw httpError(403, 'Request origin not allowed', 'bad-origin');
+  let o;
+  try { o = new URL(origin); } catch { throw httpError(403, 'Request origin not allowed', 'bad-origin'); }
+  if (o.host.toLowerCase() !== String(host).split(',')[0].trim().toLowerCase()) {
+    throw httpError(403, 'Request origin not allowed', 'bad-origin');
+  }
+}
+
+/** Fixed-window rate limit. Throws 429 when `limit` is exceeded within `windowS`. */
+export async function rateLimit(bucket, id, limit, windowS) {
+  const key = keys.rate(bucket, sha256(id || 'unknown').slice(0, 24));
+  const r = redis();
+  const n = await r.incr(key);
+  if (n === 1) await r.expire(key, windowS);
+  if (n > limit) {
+    const err = httpError(429, 'Too many attempts. Please wait a minute and try again.', 'rate-limited');
+    err.retryAfter = windowS;
+    throw err;
+  }
 }
 
 // ---- Device state ----------------------------------------------------------
@@ -139,6 +190,10 @@ export function isOnline(device, now = Date.now()) {
   return Boolean(device?.lastSeen && now - device.lastSeen < ONLINE_WINDOW_MS);
 }
 
+export function canReplaceSecret(device, owned, now = Date.now()) {
+  return !device?.secretHash || (!owned && now - (device.lastSeen || 0) > STALE_SECRET_MS);
+}
+
 export function publicView(device, now = Date.now()) {
   return {
     deviceId: device.deviceId,
@@ -147,23 +202,11 @@ export function publicView(device, now = Date.now()) {
     ip: device.localIp || null,
     port: device.port || 5000,
     online: isOnline(device, now),
+    status: isOnline(device, now) ? 'online' : 'offline',
     lastSeen: device.lastSeen || null,
+    agentVersion: device.agentVersion || null,
     method: 'cloud',
   };
-}
-
-// The browser proves it was paired with this Pi (header X-Device-Token).
-export async function requireController(req, deviceId) {
-  if (!DEVICE_ID_RX.test(deviceId || '')) throw httpError(400, 'Invalid device id');
-  const token = req.headers['x-device-token'];
-  if (typeof token !== 'string' || token.length < 20 || token.length > 200) {
-    throw httpError(401, 'This browser is not paired with the Raspberry Pi. Remove the device and add it again.');
-  }
-  const ok = await redis().sismember(keys.controllers(deviceId), sha256(token));
-  if (!ok) throw httpError(401, 'This browser is not paired with the Raspberry Pi. Remove the device and add it again.');
-  const device = await getDevice(deviceId);
-  if (!device) throw httpError(404, 'Raspberry Pi not found in the cloud');
-  return device;
 }
 
 // ---- Commands --------------------------------------------------------------
@@ -180,7 +223,7 @@ export async function enqueueCommand(deviceId, command) {
 
 export async function pendingCommands(deviceId) {
   const list = (await redis().lrange(keys.commands(deviceId), 0, 19)) || [];
-  return list.map((c) => (typeof c === 'string' ? JSON.parse(c) : c));
+  return list.map(parse);
 }
 
 export async function completeCommands(deviceId, results) {
@@ -202,7 +245,7 @@ export async function completeCommands(deviceId, results) {
   await r.hset(keys.results(deviceId), updates);
   const list = (await r.lrange(keys.commands(deviceId), 0, -1)) || [];
   for (const raw of list) {
-    const cmd = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const cmd = parse(raw);
     if (done.has(cmd.id)) await r.lrem(keys.commands(deviceId), 1, typeof raw === 'string' ? raw : JSON.stringify(raw));
   }
 }
@@ -229,3 +272,5 @@ export function cleanReport(body) {
   const agentVersion = typeof body.agentVersion === 'string' ? body.agentVersion.slice(0, 20) : null;
   return { username, hostname, localIp, port, media, currentMedia, agentVersion };
 }
+
+export const NET_TTL_S = NET_INDEX_TTL_S;

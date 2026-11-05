@@ -8,6 +8,7 @@
 // =============================================
 import axios from 'axios';
 import { upload } from '@vercel/blob/client';
+import { replaceDevices } from '../data/store';
 
 const PRIVATE_HOST_RX = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?$)|\.local$/i;
 
@@ -28,26 +29,36 @@ export function connectionMode() {
 
 export const isCloudMode = () => connectionMode() === 'cloud';
 
-/** A device registered through the cloud relay (has a pairing token). */
-export const isCloudDevice = (device) => Boolean(device?.cloudToken && device?.piDeviceId);
+/** A Pi registered in the logged-in customer's cloud account. */
+export const isCloudDevice = (device) => Boolean(device?.cloud && device?.piDeviceId);
+
+/** Fired when any cloud call reports that the session has ended. */
+export const LOGGED_OUT_EVENT = 'nsignage:logged-out';
 
 function cloudError(error, context) {
   const data = error.response?.data;
+  if (error.response?.status === 401 && data?.reason === 'not-logged-in') {
+    try { window.dispatchEvent(new Event(LOGGED_OUT_EVENT)); } catch { /* non-browser */ }
+  }
   if (data?.error) return `${context} failed: ${data.error}`;
   if (error.code === 'ECONNABORTED') return `${context} timed out. Check your internet connection.`;
   if (error.response?.status === 404) return `${context} failed: the cloud service is not available on this website yet.`;
   return `${context} failed: ${error.message || 'Unknown error'}`;
 }
 
-const headers = (device) => ({ 'X-Device-Token': device.cloudToken });
 const deviceUrl = (device, action, extra = '') =>
   `/api/device?deviceId=${encodeURIComponent(device.piDeviceId)}&action=${action}${extra}`;
 
-// ---- Find & pair -----------------------------------------------------------
+// ---- Find, add, rename, remove ---------------------------------------------
 
-export async function cloudFindPi(identifier) {
+/**
+ * Pis that synced with the cloud from this browser's network in the last
+ * 2 minutes. `identifier` (Pi Linux username) is an optional filter.
+ */
+export async function cloudFindPi(identifier = '') {
+  const q = identifier ? `?identifier=${encodeURIComponent(identifier)}` : '';
   try {
-    const res = await axios.get(`/api/find?identifier=${encodeURIComponent(identifier)}`, { timeout: 15000 });
+    const res = await axios.get(`/api/find${q}`, { timeout: 15000 });
     return { log: [], devices: [], ...res.data };
   } catch (error) {
     const data = error.response?.data;
@@ -67,12 +78,64 @@ export async function cloudFindPi(identifier) {
   }
 }
 
-export async function cloudPair(deviceId, username) {
+/** Store-shaped record for a Pi in the account (see data/store.js). */
+function toStoreDevice(d) {
+  return {
+    id: `cloud-${d.deviceId}`,
+    cloud: true,
+    piDeviceId: d.deviceId,
+    deviceId: d.username,
+    nickName: d.name || '',
+    location: d.location || '',
+    hostname: d.hostname || undefined,
+    ip: d.ip || '',
+    port: d.port || 5000,
+    online: d.online,
+    lastSeen: d.lastSeen,
+    createdAt: d.addedAt ? new Date(d.addedAt).toISOString() : undefined,
+  };
+}
+
+/** Load the account's Pis from the cloud into the local device cache. */
+export async function syncCloudDevices() {
   try {
-    const res = await axios.post('/api/pair', { deviceId, username }, { timeout: 15000 });
-    return { ok: true, token: res.data.token, device: res.data.device };
+    const res = await axios.get('/api/devices', { timeout: 15000 });
+    const list = (res.data.devices || []).map(toStoreDevice);
+    replaceDevices(list);
+    return { ok: true, devices: list };
   } catch (error) {
-    return { ok: false, error: cloudError(error, 'Pairing') };
+    return { ok: false, error: cloudError(error, 'Loading your devices') };
+  }
+}
+
+/** Add Device: register a Pi found by cloudFindPi in this account. */
+export async function cloudClaim(claimNonce, { name, location } = {}) {
+  try {
+    const res = await axios.post('/api/devices', { claimNonce, name, location }, { timeout: 15000 });
+    await syncCloudDevices();
+    return { ok: true, device: toStoreDevice(res.data.device) };
+  } catch (error) {
+    return { ok: false, reason: error.response?.data?.reason, error: cloudError(error, 'Adding the device') };
+  }
+}
+
+export async function cloudRename(device, { name, location }) {
+  try {
+    await axios.patch(`/api/devices?deviceId=${encodeURIComponent(device.piDeviceId)}`, { name, location }, { timeout: 15000 });
+    await syncCloudDevices();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: cloudError(error, 'Saving the device') };
+  }
+}
+
+export async function cloudRemove(device) {
+  try {
+    await axios.delete(`/api/devices?deviceId=${encodeURIComponent(device.piDeviceId)}`, { timeout: 20000 });
+    await syncCloudDevices();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: cloudError(error, 'Removing the device') };
   }
 }
 
@@ -81,7 +144,7 @@ export async function cloudPair(deviceId, username) {
 export async function cloudStatus(device) {
   const start = Date.now();
   try {
-    const res = await axios.get(deviceUrl(device, 'status'), { headers: headers(device), timeout: 10000 });
+    const res = await axios.get(deviceUrl(device, 'status'), { timeout: 10000 });
     const latency = Date.now() - start;
     return res.data.ok
       ? { ok: true, data: res.data.data, latency, lastSeen: res.data.lastSeen }
@@ -93,7 +156,7 @@ export async function cloudStatus(device) {
 
 export async function cloudMedia(device) {
   try {
-    const res = await axios.get(deviceUrl(device, 'media'), { headers: headers(device), timeout: 15000 });
+    const res = await axios.get(deviceUrl(device, 'media'), { timeout: 15000 });
     return { ok: true, data: res.data.media || [], pending: res.data.pending || [], online: res.data.online };
   } catch (error) {
     return { ok: false, error: cloudError(error, 'Fetch media') };
@@ -101,15 +164,12 @@ export async function cloudMedia(device) {
 }
 
 async function sendCommand(device, command) {
-  const res = await axios.post(deviceUrl(device, 'command'), command, { headers: headers(device), timeout: 15000 });
+  const res = await axios.post(deviceUrl(device, 'command'), command, { timeout: 15000 });
   return res.data.command;
 }
 
 async function commandResult(device, id) {
-  const res = await axios.get(deviceUrl(device, 'result', `&id=${encodeURIComponent(id)}`), {
-    headers: headers(device),
-    timeout: 10000,
-  });
+  const res = await axios.get(deviceUrl(device, 'result', `&id=${encodeURIComponent(id)}`), { timeout: 10000 });
   return res.data;
 }
 
@@ -142,7 +202,7 @@ export async function cloudUpload(device, file, onProgress) {
     blob = await upload(`media/${device.piDeviceId}/${filename}`, file, {
       access: 'public',
       handleUploadUrl: '/api/device?action=upload',
-      clientPayload: JSON.stringify({ deviceId: device.piDeviceId, token: device.cloudToken }),
+      clientPayload: JSON.stringify({ deviceId: device.piDeviceId }),
       multipart: file.size > 20 * 1024 * 1024,
       contentType: file.type || undefined,
       onUploadProgress: ({ percentage }) => onProgress?.(Math.round(percentage * 0.9)),

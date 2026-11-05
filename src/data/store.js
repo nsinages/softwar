@@ -1,9 +1,12 @@
 // =============================================
 // N Signage V2 — Local Data Store
-// localStorage-backed config for devices/classrooms
+// localStorage-backed config for devices/classrooms.
+// On the hosted website (cloud mode) the device list is a cache of the
+// logged-in account's devices, refreshed from /api/devices.
 // =============================================
 
 const DEVICES_KEY = 'nsignage_devices';
+export const DEVICES_CHANGED_EVENT = 'nsignage:devices-changed';
 const SETTINGS_KEY = 'nsignage_settings';
 
 // --- Helpers ---
@@ -26,6 +29,9 @@ function writeJson(key, value) {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (err) {
     throw new Error(`Could not save to browser storage: ${err.message}`);
+  }
+  if (key === DEVICES_KEY) {
+    try { window.dispatchEvent(new Event(DEVICES_CHANGED_EVENT)); } catch { /* non-browser */ }
   }
 }
 
@@ -68,6 +74,11 @@ export function deleteDevice(id) {
 
 export function clearAllDevices() {
   writeJson(DEVICES_KEY, []);
+}
+
+/** Replace the whole cached list (cloud mode: the account's devices). */
+export function replaceDevices(list) {
+  writeJson(DEVICES_KEY, Array.isArray(list) ? list : []);
 }
 
 // --- Settings ---

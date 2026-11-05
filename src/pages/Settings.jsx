@@ -12,6 +12,7 @@ import {
   KeyRound,
 } from 'lucide-react';
 import { getSettings, saveSettings, clearAllDevices, SETTINGS_LIMITS } from '../data/store';
+import { isCloudMode } from '../api/cloudApi';
 
 export default function Settings() {
   const [settings, setSettings] = useState(() => getSettings());
@@ -164,7 +165,7 @@ export default function Settings() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
             {[
               ['Platform', 'N-Signage Digital Signage System'],
-              ['Version', '4.5.0 (V3 Discovery Enabled)'],
+              ['Version', '4.6.0 (Cloud accounts + Find Pi)'],
               ['Architecture', 'Decentralized Edge Nodes + Central Management Console'],
               ['Communication Protocol', 'Direct REST API over LAN / Wi-Fi'],
               ['Device Storage', 'Client-side LocalStorage + Raspberry Pi FS'],
@@ -189,7 +190,8 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* Reset Database Section */}
+        {/* Reset Database Section (LAN mode only: in cloud mode devices live in the account) */}
+        {!isCloudMode() && (
         <div className="card" style={{ borderColor: 'rgba(239, 68, 68, 0.25)' }}>
           <div className="card-header">
             <div className="card-title" style={{ color: 'var(--danger)' }}>
@@ -217,6 +219,7 @@ export default function Settings() {
             )}
           </div>
         </div>
+        )}
 
         {/* Save Settings Action Bar */}
         <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center', marginTop: 'var(--space-2)' }}>

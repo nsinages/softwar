@@ -22,49 +22,32 @@ Device list and settings are stored in each browser's `localStorage`.
 ## Hosted website (cloud relay) — software.nsinages.in
 
 A website hosted on the internet (Vercel) can never connect to a Pi on a
-customer's Wi-Fi. When the site is opened from a public domain it switches to
-**cloud mode** automatically: every Pi connects *out* to the website, and the
-website relays everything through the cloud.
+customer's Wi-Fi, and browsers cannot do UDP/mDNS discovery. When the site is
+opened from a public domain it switches to **cloud mode** automatically:
+customers log in, every Pi connects *out* to the website, and "Find Pi" lists
+the Pis that synced from the customer's own network (same public IP).
 
 ```
 Pi (cloud_agent.py) ──every 5 s──►  POST /api/pi/sync   ◄── queued commands (download / delete)
-Browser ──► /api/find   (Pis with this username on the SAME public IP / Wi-Fi as the browser)
-        ──► /api/pair   (pairs this browser with the Pi → control token in localStorage)
-        ──► /api/device (status, media list, delete; uploads go to Vercel Blob, the Pi downloads them)
+Browser ──► /api/auth     log in / create account (HttpOnly session cookie)
+        ──► /api/find     Pis on the SAME Wi-Fi as the browser (no username needed)
+        ──► /api/devices  Add Device (single-use nonce) / rename / remove — stored in the account
+        ──► /api/device   status, media list, delete; uploads go to Vercel Blob, the Pi downloads them
 ```
 
-A Pi can only be **added** from a device on the same Wi-Fi as the Pi. After
-that, it can be managed from anywhere.
+A Pi can only be **added** from a phone or computer on the same Wi-Fi as the
+Pi. After that it can be managed from anywhere, on any device the customer
+logs in from.
 
-### One-time Vercel setup
+**Setup, Pi install, customer/staff instructions, security and limitations:**
+see [docs/CLOUD-DISCOVERY.md](docs/CLOUD-DISCOVERY.md).
 
-In the Vercel project → **Storage**:
+Quick version:
 
-1. **Create / connect an Upstash Redis** database (Marketplace → Upstash → Redis).
-   This adds `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
-2. **Create / connect a Blob store** with **public** access.
-   This adds `BLOB_READ_WRITE_TOKEN`.
-3. Redeploy.
-4. Check: `curl https://software.nsinages.in/api/health` → `{"ok":true,"redis":{"configured":true,"reachable":true},...}`.
-   If `/api/find` returns HTTP 503 `cloud-not-configured`, step 1 is missing.
-
-### On every Raspberry Pi
-
-Run from the N-Signage folder on the Pi, as the Pi's normal user (the user
-customers type into Find Pi). The unit is rewritten for that user and folder:
-
-```bash
-PIUSER=$(id -un); PIDIR=$(pwd)
-sed -e "s|^User=.*|User=$PIUSER|" -e "s|/home/nsignage/n-signage|$PIDIR|g" \
-  n-signage-cloud.service | sudo tee /etc/systemd/system/n-signage-cloud.service >/dev/null
-sudo systemctl daemon-reload
-sudo systemctl enable --now n-signage-cloud.service
-journalctl -u n-signage-cloud -f      # expect "Connected to the cloud"
-```
-
-`NSIGNAGE_CLOUD_URL` in `/etc/n-signage.env` changes the website address
-(default `https://software.nsinages.in`). Mode is detected from the page's
-host name; force it with `VITE_CONNECTION_MODE=cloud|lan` at build time.
+1. Vercel → Storage: connect **Upstash Redis** and a **public Blob** store, redeploy.
+   `curl https://software.nsinages.in/api/health` → `"ok":true`.
+2. On each Pi, in the N-Signage folder: `sudo ./install-cloud-agent.sh`
+   (detects the Linux user and folder; `--uninstall` to roll back).
 
 ## Requirements
 

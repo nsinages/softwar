@@ -2,8 +2,8 @@
 // Auth: `Authorization: Bearer <device secret>`. The first sync of a device id
 // registers the secret; every later sync must present the same one.
 import {
-  redis, keys, sha256, safeEqual, clientIp, send, handleError, httpError, readJsonBody,
-  DEVICE_ID_RX, NEARBY_IP_WINDOW_MS, cleanReport, getDevice, pendingCommands, completeCommands,
+  redis, keys, sha256, safeEqual, clientIp, networkKey, send, handleError, httpError, readJsonBody,
+  DEVICE_ID_RX, NET_TTL_S, cleanReport, getDevice, pendingCommands, completeCommands, canReplaceSecret,
 } from '../_lib/cloud.js';
 
 export default async function handler(req, res) {
@@ -21,33 +21,36 @@ export default async function handler(req, res) {
     const r = redis();
     const now = Date.now();
     const existing = await getDevice(deviceId);
-    if (existing && !safeEqual(existing.secretHash, sha256(secret))) {
-      throw httpError(401, 'Device secret does not match. Reset the device in the cloud to re-register it.');
+    let secretHash = existing?.secretHash;
+    if (existing?.secretHash && !safeEqual(existing.secretHash, sha256(secret))) {
+      // A re-flashed SD card creates a new secret. Accept it only for a Pi that
+      // no account owns and that has been silent for a while; owned Pis must be
+      // removed from their account first (that clears the stored secret).
+      const owned = Boolean(await r.get(keys.owner(deviceId)));
+      if (!canReplaceSecret(existing, owned, now)) {
+        throw httpError(401, 'Device secret does not match. Remove this Pi from its account on the website, then it can re-register.');
+      }
+      console.warn('[N-SIGNAGE CLOUD] device secret replaced for unowned device', deviceId);
+      secretHash = null;
     }
 
-    // Remember recent public IPs (IPv4 and IPv6) so a browser on the same
-    // network can find and pair with this Pi.
     const ip = clientIp(req);
-    const publicIps = {};
-    for (const [k, t] of Object.entries(existing?.publicIps || {})) {
-      if (now - t < NEARBY_IP_WINDOW_MS) publicIps[k] = t;
-    }
-    if (ip) publicIps[ip] = now;
-
     const device = {
       deviceId,
-      secretHash: existing?.secretHash || sha256(secret),
+      secretHash: secretHash || sha256(secret),
       ...report,
-      publicIps,
       firstSeen: existing?.firstSeen || now,
       lastSeen: now,
     };
-
-    if (existing && existing.username.toLowerCase() !== report.username.toLowerCase()) {
-      await r.srem(keys.user(existing.username), deviceId);
-    }
     await r.set(keys.device(deviceId), device);
-    await r.sadd(keys.user(report.username), deviceId);
+
+    // Network index used by Find Pi: deviceId scored by last sync time.
+    const net = networkKey(ip);
+    if (net) {
+      await r.zadd(keys.net(net), { score: now, member: deviceId });
+      await r.zremrangebyscore(keys.net(net), 0, now - NET_TTL_S * 1000);
+      await r.expire(keys.net(net), NET_TTL_S);
+    }
 
     await completeCommands(deviceId, body.results);
     const commands = await pendingCommands(deviceId);

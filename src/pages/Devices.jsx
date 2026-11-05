@@ -16,9 +16,10 @@ import {
   AlertTriangle,
   CheckCircle2,
 } from 'lucide-react';
-import { getDevices, saveDevice, updateDevice, deleteDevice } from '../data/store';
+import { getDevices, saveDevice, updateDevice, deleteDevice, DEVICES_CHANGED_EVENT } from '../data/store';
 import { getPiStatus } from '../api/piApi';
-import { isCloudMode, cloudPair } from '../api/cloudApi';
+import { isCloudMode, cloudRename, cloudRemove, syncCloudDevices } from '../api/cloudApi';
+import CloudFindPi from '../components/CloudFindPi';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import PiDiscoveryPanel from '../components/PiDiscoveryPanel';
@@ -26,6 +27,7 @@ import PiDiscoveryPanel from '../components/PiDiscoveryPanel';
 const EMPTY_FORM = {
   deviceId: '',
   nickName: '',
+  location: '',
   ip: '',
 };
 
@@ -53,9 +55,21 @@ export default function Devices() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [pageError, setPageError] = useState('');
   const formSession = useRef(0);
 
+  const cloud = isCloudMode();
   const reload = () => setDevices(getDevices());
+
+  // Cloud mode: the list is the logged-in account's devices (shared across browsers)
+  useEffect(() => {
+    const onChange = () => setDevices(getDevices());
+    window.addEventListener(DEVICES_CHANGED_EVENT, onChange);
+    if (cloud) {
+      syncCloudDevices().then(res => { if (!res.ok) setPageError(res.error); });
+    }
+    return () => window.removeEventListener(DEVICES_CHANGED_EVENT, onChange);
+  }, [cloud]);
 
   // Handle navigation state (e.g. from dashboard or direct route)
   useEffect(() => {
@@ -84,6 +98,7 @@ export default function Devices() {
     setForm({
       deviceId: device.deviceId || '',
       nickName: device.nickName || '',
+      location: device.location || '',
       ip: device.ip || '',
     });
     setErrors({});
@@ -114,6 +129,11 @@ export default function Devices() {
 
   function validate() {
     const e = {};
+    if (cloud) {
+      if (form.nickName.trim().length > 64) e.nickName = 'Name must be 64 characters or fewer';
+      if (form.location.trim().length > 80) e.location = 'Location must be 80 characters or fewer';
+      return e;
+    }
     if (!form.deviceId.trim()) e.deviceId = 'Pi Username / Device Identifier is required';
     else if (!USERNAME_RX.test(form.deviceId.trim()))
       e.deviceId = 'Enter the Pi\'s Linux username (letters, numbers, "_", "." or "-"), e.g. ns';
@@ -144,40 +164,6 @@ export default function Devices() {
 
     setSubmitting(true);
     setFormError('');
-
-    // Hosted website: the Pi cannot be reached directly, so pair with the Pi
-    // that Find Pi located through the cloud relay.
-    if (isCloudMode()) {
-      if (!discovered?.deviceId || !sameUser(discovered.username, username)) {
-        setSubmitting(false);
-        setFormError('Click "Find Pi" first. On the website, a Raspberry Pi can only be added after it has been found.');
-        return;
-      }
-      if (current.some(d => d.piDeviceId === discovered.deviceId)) {
-        setSubmitting(false);
-        setFormError('This Raspberry Pi is already registered.');
-        return;
-      }
-      const pair = await cloudPair(discovered.deviceId, username);
-      if (session !== formSession.current) return;
-      if (!pair.ok) {
-        setSubmitting(false);
-        setFormError(pair.error);
-        return;
-      }
-      const saved = saveDevice({
-        deviceId: pair.device.username,
-        nickName: form.nickName.trim(),
-        ip: pair.device.ip || ip,
-        ...(pair.device.hostname && { hostname: pair.device.hostname }),
-        piDeviceId: pair.device.deviceId,
-        cloudToken: pair.token,
-      });
-      reload();
-      closeForm();
-      setSuccessMsg(`${saved.nickName || saved.deviceId} was added successfully. You can now manage it from anywhere.`);
-      return;
-    }
 
     const status = await getPiStatus({ ip });
     if (session !== formSession.current) return; // form was closed meanwhile
@@ -232,6 +218,18 @@ export default function Devices() {
       return;
     }
     setErrors({});
+    if (editId && cloud) {
+      const device = getDevices().find(d => d.id === editId);
+      setSubmitting(true);
+      setFormError('');
+      cloudRename(device, { name: form.nickName.trim(), location: form.location.trim() }).then(res => {
+        setSubmitting(false);
+        if (!res.ok) { setFormError(res.error); return; }
+        reload();
+        closeForm();
+      });
+      return;
+    }
     if (editId) {
       updateDevice(editId, {
         deviceId: form.deviceId.trim(),
@@ -246,9 +244,17 @@ export default function Devices() {
     closeForm();
   }
 
-  function handleDelete() {
+  async function handleDelete() {
     if (!deleteTarget) return;
     setDeleteLoading(true);
+    if (cloud) {
+      const res = await cloudRemove(deleteTarget);
+      setDeleteLoading(false);
+      setDeleteTarget(null);
+      setPageError(res.ok ? '' : res.error);
+      reload();
+      return;
+    }
     setTimeout(() => {
       deleteDevice(deleteTarget.id);
       reload();
@@ -272,6 +278,8 @@ export default function Devices() {
       d =>
         d.deviceId?.toLowerCase().includes(q) ||
         d.nickName?.toLowerCase().includes(q) ||
+        d.hostname?.toLowerCase().includes(q) ||
+        d.location?.toLowerCase().includes(q) ||
         d.ip?.includes(q)
     );
   }, [devices, searchQ]);
@@ -301,6 +309,16 @@ export default function Devices() {
             onClick={() => setSuccessMsg('')}
             aria-label="Dismiss"
           >
+            <X size={13} />
+          </button>
+        </div>
+      )}
+
+      {pageError && (
+        <div className="alert alert-danger" style={{ marginBottom: 'var(--space-4)' }}>
+          <AlertTriangle size={15} className="alert-icon" />
+          <span style={{ flex: 1 }}>{pageError}</span>
+          <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setPageError('')} aria-label="Dismiss">
             <X size={13} />
           </button>
         </div>
@@ -477,6 +495,11 @@ export default function Devices() {
                           <div style={{ fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
                             {device.deviceId}
                           </div>
+                          {(device.hostname || device.location) && (
+                            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                              {[device.hostname, device.location].filter(Boolean).join(' · ')}
+                            </div>
+                          )}
                         </div>
                       </div>
                     </td>
@@ -582,7 +605,7 @@ export default function Devices() {
             <div className="modal-header">
               <div className="modal-title">
                 <Tv size={18} style={{ color: 'var(--accent)' }} />
-                <span>{editId ? 'Edit Device' : 'Add New Device'}</span>
+                <span>{editId ? 'Edit Device' : cloud ? 'Find Pi & Add Device' : 'Add New Device'}</span>
               </div>
               <button
                 className="btn btn-ghost btn-icon btn-sm"
@@ -593,6 +616,45 @@ export default function Devices() {
               </button>
             </div>
 
+            {cloud && !editId ? (
+              <CloudFindPi
+                onAdded={saved => {
+                  reload();
+                  closeForm();
+                  setSuccessMsg(`${saved.nickName || saved.hostname || saved.deviceId} was added to your account. It stays registered when you log in from any phone or computer.`);
+                }}
+              />
+            ) : cloud ? (
+            <form onSubmit={handleSubmit}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+                <div className="form-group">
+                  <label className="form-label">Display name</label>
+                  <input className="form-input" maxLength={64} value={form.nickName}
+                    onChange={e => setForm(f => ({ ...f, nickName: e.target.value }))} />
+                  {errors.nickName && <span className="form-error">{errors.nickName}</span>}
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Location</label>
+                  <input className="form-input" maxLength={80} value={form.location}
+                    onChange={e => setForm(f => ({ ...f, location: e.target.value }))} />
+                  {errors.location && <span className="form-error">{errors.location}</span>}
+                  <span className="form-hint">Username, hostname and IP address are reported by the Raspberry Pi itself.</span>
+                </div>
+                {formError && (
+                  <div className="alert alert-danger" style={{ fontSize: 'var(--text-xs)' }}>
+                    <AlertTriangle size={14} className="alert-icon" />
+                    <span>{formError}</span>
+                  </div>
+                )}
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" onClick={closeForm}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={submitting}>
+                  {submitting ? 'Saving…' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+            ) : (
             <form onSubmit={handleSubmit}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
                 {/* Device Identifier */}
@@ -673,6 +735,7 @@ export default function Devices() {
                 </button>
               </div>
             </form>
+            )}
           </div>
         </div>
       )}
@@ -688,7 +751,9 @@ export default function Devices() {
           <span>
             Are you sure you want to remove <strong>{deleteTarget?.deviceId}</strong>?
             <br /><br />
-            This will remove the display from this management dashboard. The physical Raspberry Pi and its stored files will remain unaffected.
+            {cloud
+              ? 'This removes the display from your account on every phone and computer. Media already on the Raspberry Pi stays there and keeps playing. You can add it again later with Find Pi.'
+              : 'This will remove the display from this management dashboard. The physical Raspberry Pi and its stored files will remain unaffected.'}
           </span>
         }
         confirmLabel="Delete Device"

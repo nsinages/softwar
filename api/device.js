@@ -1,6 +1,5 @@
-// /api/device?deviceId=<id>&action=<action> — manage a paired Pi through the cloud.
-// Every action needs the browser's pairing token in the X-Device-Token header
-// (for `upload`, inside the Vercel Blob clientPayload instead).
+// /api/device?deviceId=<id>&action=<action> — manage a Pi through the cloud.
+// Every action needs a logged-in session (cookie) whose account owns the Pi.
 //
 //   GET  action=status            last state reported by the Pi
 //   GET  action=media             media files on the Pi (+ preview URLs)
@@ -11,9 +10,10 @@
 import { handleUpload } from '@vercel/blob/client';
 import { del } from '@vercel/blob';
 import {
-  redis, keys, send, handleError, httpError, readJsonBody, requireController,
-  isOnline, enqueueCommand, pendingCommands, sha256, MEDIA_NAME_RX, DEVICE_ID_RX,
+  redis, keys, send, handleError, httpError, readJsonBody, requireSameOrigin,
+  isOnline, enqueueCommand, pendingCommands, parse, MEDIA_NAME_RX, DEVICE_ID_RX,
 } from './_lib/cloud.js';
+import { requireOwnedDevice } from './_lib/auth.js';
 
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const ALLOWED_CONTENT_TYPES = [
@@ -21,8 +21,6 @@ const ALLOWED_CONTENT_TYPES = [
   'video/mp4', 'video/x-m4v', 'video/webm', 'video/quicktime',
 ];
 const BLOB_HOST_RX = /^[a-z0-9-]+\.public\.blob\.vercel-storage\.com$/i;
-
-const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
 
 function isBlobUrl(url) {
   try {
@@ -120,10 +118,9 @@ async function uploadAction(req, body) {
     onBeforeGenerateToken: async (pathname, clientPayload) => {
       let payload;
       try { payload = JSON.parse(clientPayload || '{}'); } catch { throw httpError(400, 'Invalid upload payload'); }
-      const { deviceId, token } = payload;
-      if (!DEVICE_ID_RX.test(deviceId || '') || typeof token !== 'string') throw httpError(401, 'Not paired');
-      const paired = await redis().sismember(keys.controllers(deviceId), sha256(token));
-      if (!paired) throw httpError(401, 'This browser is not paired with the Raspberry Pi.');
+      const deviceId = String(payload.deviceId || '');
+      if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
+      await requireOwnedDevice(req, deviceId); // session cookie must own this Pi
       if (!pathname.startsWith(`media/${deviceId}/`)) throw httpError(400, 'Invalid upload path');
       return {
         allowedContentTypes: ALLOWED_CONTENT_TYPES,
@@ -139,17 +136,26 @@ export default async function handler(req, res) {
     const action = String(req.query?.action || '');
     if (action === 'upload') {
       if (req.method !== 'POST') throw httpError(405, 'Method not allowed');
-      send(res, 200, await uploadAction(req, readJsonBody(req)));
+      const body = readJsonBody(req);
+      if (body?.type !== 'blob.generate-client-token') throw httpError(400, 'Unsupported upload event');
+      requireSameOrigin(req);
+      if (!process.env.BLOB_READ_WRITE_TOKEN) {
+        throw httpError(503, 'Media storage is not configured. Connect a Vercel Blob store to this project.', 'blob-not-configured');
+      }
+      send(res, 200, await uploadAction(req, body));
       return;
     }
 
     const deviceId = String(req.query?.deviceId || '');
-    const device = await requireController(req, deviceId);
+    const { device } = await requireOwnedDevice(req, deviceId);
 
     if (req.method === 'GET' && action === 'status') return send(res, 200, await statusAction(device));
     if (req.method === 'GET' && action === 'media') return send(res, 200, await mediaAction(device));
     if (req.method === 'GET' && action === 'result') return send(res, 200, await resultAction(device, req.query?.id));
-    if (req.method === 'POST' && action === 'command') return send(res, 200, await commandAction(device, readJsonBody(req)));
+    if (req.method === 'POST' && action === 'command') {
+      requireSameOrigin(req);
+      return send(res, 200, await commandAction(device, readJsonBody(req)));
+    }
     throw httpError(404, 'Unknown action');
   } catch (err) {
     handleError(res, err);
