@@ -66,7 +66,7 @@ export default function Devices() {
     const onChange = () => setDevices(getDevices());
     window.addEventListener(DEVICES_CHANGED_EVENT, onChange);
     if (cloud) {
-      syncCloudDevices().then(res => { if (!res.ok) setPageError(res.error); });
+      syncCloudDevices(); // failures are shown once, in the app-wide banner
     }
     return () => window.removeEventListener(DEVICES_CHANGED_EVENT, onChange);
   }, [cloud]);
