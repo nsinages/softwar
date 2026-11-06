@@ -1,9 +1,12 @@
 // =============================================
 // N Signage V2 — Local Data Store
-// localStorage-backed config for devices/classrooms.
-// On the hosted website (cloud mode) the device list is a cache of the
-// Pis added in this browser, refreshed from /api/devices.
+// LAN dashboard: devices and settings are kept in this browser's localStorage.
+// Customer website (cloud mode): the device list lives IN MEMORY only. It is
+// loaded from the server (Supabase) after sign-in and on every page load, and
+// is never written to browser storage, so nothing about a customer's displays
+// stays in the browser after the tab is closed.
 // =============================================
+import { isCloudMode } from '../api/mode';
 
 const DEVICES_KEY = 'nsignage_devices';
 export const DEVICES_CHANGED_EVENT = 'nsignage:devices-changed';
@@ -41,9 +44,22 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
+// --- Device list storage: memory (cloud) or localStorage (LAN) ---
+let memoryDevices = [];
+
+function readDevices() {
+  return isCloudMode() ? memoryDevices : readJson(DEVICES_KEY, []);
+}
+
+function writeDevices(list) {
+  if (!isCloudMode()) { writeJson(DEVICES_KEY, list); return; }
+  memoryDevices = list;
+  try { window.dispatchEvent(new Event(DEVICES_CHANGED_EVENT)); } catch { /* non-browser */ }
+}
+
 // --- Device CRUD ---
 export function getDevices() {
-  const list = readJson(DEVICES_KEY, []);
+  const list = readDevices();
   return Array.isArray(list) ? list.filter((d) => d && typeof d === 'object' && d.id) : [];
 }
 
@@ -55,7 +71,7 @@ export function saveDevice(deviceData) {
     createdAt: new Date().toISOString(),
   };
   devices.push(newDevice);
-  writeJson(DEVICES_KEY, devices);
+  writeDevices(devices);
   return newDevice;
 }
 
@@ -64,21 +80,21 @@ export function updateDevice(id, updates) {
   const idx = devices.findIndex((d) => d.id === id);
   if (idx === -1) throw new Error('Device not found');
   devices[idx] = { ...devices[idx], ...updates, id, updatedAt: new Date().toISOString() };
-  writeJson(DEVICES_KEY, devices);
+  writeDevices(devices);
   return devices[idx];
 }
 
 export function deleteDevice(id) {
-  writeJson(DEVICES_KEY, getDevices().filter((d) => d.id !== id));
+  writeDevices(getDevices().filter((d) => d.id !== id));
 }
 
 export function clearAllDevices() {
-  writeJson(DEVICES_KEY, []);
+  writeDevices([]);
 }
 
-/** Replace the whole cached list (cloud mode: this browser's devices). */
+/** Replace the whole list (cloud mode: this account's devices from the server). */
 export function replaceDevices(list) {
-  writeJson(DEVICES_KEY, Array.isArray(list) ? list : []);
+  writeDevices(Array.isArray(list) ? list : []);
 }
 
 // --- Settings ---

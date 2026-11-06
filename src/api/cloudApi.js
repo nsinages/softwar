@@ -10,24 +10,8 @@ import axios from 'axios';
 import { replaceDevices } from '../data/store';
 import { LOGGED_OUT_EVENT } from './authApi';
 
-const PRIVATE_HOST_RX = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?$)|\.local$/i;
-
-/**
- * 'cloud' when the site is served from a public domain, 'lan' when it is
- * opened from this machine or a LAN address (Vite dev / `npm start`).
- * Override at build time with VITE_CONNECTION_MODE=cloud|lan.
- */
-export function connectionMode() {
-  const forced = import.meta.env.VITE_CONNECTION_MODE;
-  if (forced === 'cloud' || forced === 'lan') return forced;
-  try {
-    return PRIVATE_HOST_RX.test(window.location.hostname) ? 'lan' : 'cloud';
-  } catch {
-    return 'lan';
-  }
-}
-
-export const isCloudMode = () => connectionMode() === 'cloud';
+// Mode detection lives in ./mode.js (also used by the device store); re-exported here.
+export { connectionMode, isCloudMode } from './mode';
 
 /** A Pi added in this browser through the cloud relay. */
 export const isCloudDevice = (device) => Boolean(device?.cloud && device?.piDeviceId);
