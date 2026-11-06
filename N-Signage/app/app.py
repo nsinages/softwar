@@ -1,5 +1,7 @@
 import hmac
+import json
 import os
+import time
 import socket
 import logging
 from urllib.parse import quote
@@ -111,10 +113,12 @@ def add_cors_headers(response):
     Enable Cross-Origin Resource Sharing (CORS) for the React control panel.
     Allows GET, POST, DELETE, OPTIONS and Content-Type headers.
     """
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    if request.path == '/api/pairing':
+        return response  # same-origin only: other web pages must not read the pairing code
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, DELETE, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-Requested-With'
-    response.headers['X-Content-Type-Options'] = 'nosniff'
     return response
 
 
@@ -288,6 +292,36 @@ def display_page():
     Renders fullscreen digital signage player for TV/Monitor.
     """
     return render_template('display.html')
+
+
+LOOPBACK = {'127.0.0.1', '::1', '::ffff:127.0.0.1'}
+
+
+@app.route('/api/pairing', methods=['GET'])
+def pairing_status():
+    """
+    7. GET /api/pairing
+    Pairing code for the display's own screen (written by cloud_agent.py to
+    data/pairing.json). Only the browser running ON the Pi (127.0.0.1) may read
+    it: the code proves that the person adding the display can see its screen.
+    Response: { success, state: 'code' | 'registered' | 'none', code?, expiresAt? }
+    """
+    if request.remote_addr not in LOOPBACK:
+        return jsonify({"success": False, "error": "Only available on the display itself"}), 403
+    state = {'state': 'none'}
+    try:
+        with open(os.path.join(config.DATA_FOLDER, 'pairing.json')) as f:
+            data = json.load(f)
+        if data.get('state') == 'registered':
+            state = {'state': 'registered'}
+        elif (data.get('state') == 'code' and isinstance(data.get('code'), str)
+              and int(data.get('expiresAt') or 0) > int(time.time() * 1000)):
+            state = {'state': 'code', 'code': data['code'], 'expiresAt': int(data['expiresAt'])}
+    except (OSError, ValueError, TypeError):
+        pass  # no cloud agent / not yet synced: nothing to show
+    response = jsonify({"success": True, **state})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 # Error handlers returning JSON without surfacing tracebacks

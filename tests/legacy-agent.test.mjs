@@ -1,4 +1,5 @@
-// Backward compatibility: the unmodified Pi agent 1.0 (cloud_agent.py) syncs
+// Backward compatibility: the unmodified Pi agent 1.0 (frozen copy of the released
+// cloud_agent.py in tests/fixtures/agent-1.0) syncs
 // with the new API (Supabase/PostgreSQL storage), receives a relay transfer, saves the file, and the website
 // marks it completed (saved, not checksum-verified) and deletes the relay copy.
 // Needs Python 3 on PATH ("python" or "python3"). Run: npm test
@@ -86,7 +87,7 @@ test('unmodified agent 1.0: find, claim, relay transfer, completion, copy delete
   const mapFile = path.join(work, 'blobmap.json');
   fs.writeFileSync(mapFile, '{}');
   const proc = spawn(python, [path.resolve('tests/helpers/run_legacy_agent.py')], {
-    env: { ...process.env, CLOUD_URL: baseUrl, WORKDIR: work, BLOB_MAP: mapFile, DURATION: String(AGENT_SECONDS), PYTHONUNBUFFERED: '1' },
+    env: { ...process.env, AGENT_DIR: path.resolve('tests/fixtures/agent-1.0'), CLOUD_URL: baseUrl, WORKDIR: work, BLOB_MAP: mapFile, DURATION: String(AGENT_SECONDS), PYTHONUNBUFFERED: '1' },
   });
   const events = [];
   let out = '';

@@ -28,6 +28,13 @@
     </div>
   </div>
 
+  <!-- Pairing code (only while this display is not added to an account; see /api/pairing) -->
+  <div id="pairingOverlay" class="pairing-overlay" aria-live="polite" style="display: none;">
+    <div class="pairing-label">Add this display at <strong>software.nsinages.in</strong> &rarr; Add Device &rarr; Pairing code</div>
+    <div id="pairingCode" class="pairing-code"></div>
+    <div id="pairingExpiry" class="pairing-expiry"></div>
+  </div>
+
   <script src="{{ url_for('static', filename='js/display.js') }}"></script>
 </body>
 </html>

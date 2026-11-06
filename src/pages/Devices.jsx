@@ -467,13 +467,17 @@ export default function Devices() {
               {filtered.map(device => {
                 const testResult = testResults[device.id];
                 const isTesting = testingId === device.id;
-                const status = isTesting
+                // Cloud: a name + IP record no Pi has confirmed is always "Saved · not connected";
+                // otherwise the Pi's own heartbeat (reported by the server) until a manual Test runs.
+                const status = cloud && device.registration === 'saved'
+                  ? 'saved'
+                  : isTesting
                   ? 'checking'
-                  : !testResult
-                  ? 'unknown'
-                  : testResult.ok
-                  ? 'online'
-                  : 'offline';
+                  : testResult
+                  ? (testResult.ok ? 'online' : 'offline')
+                  : cloud && typeof device.online === 'boolean'
+                  ? (device.online ? 'online' : 'offline')
+                  : 'unknown';
 
                 return (
                   <tr key={device.id}>

@@ -26,6 +26,7 @@ import { getDevices, DEVICES_CHANGED_EVENT } from './data/store';
 import { usePiStatus } from './hooks/usePiStatus';
 import { isCloudMode } from './api/cloudApi';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+import { isOnline } from './utils/deviceStatus';
 
 export default function App() {
   // Light theme only
@@ -143,7 +144,7 @@ function Shell({ user, onLogout, loadError, onRetry }) {
   }, []);
 
   const devices = getDevices();
-  const onlineCount = devices.filter(d => statusMap[d.id]?.ok).length;
+  const onlineCount = devices.filter(d => isOnline(d, statusMap)).length;
 
   return (
     <div className="app-shell">

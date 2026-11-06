@@ -8,7 +8,10 @@
 // Optional (agent protocol 2, see docs/PI-AGENT-V2-CONTRACT.md):
 //                   { protocol: 2, capabilities: [...], storage: { freeBytes, totalBytes },
 //                     progress: [{ transferId, receivedBytes }] }
-// Response: { ok, serverTime, commands, pollSeconds }
+// Response: { ok, serverTime, commands, pollSeconds, registered }
+//   registered: true when this Pi belongs to a customer account. Agents with the
+//   'pairing' capability use it to stop/start showing a pairing code; older
+//   agents ignore it.
 //
 // One database transaction per sync: authenticate/register (system context),
 // then everything else in the Pi's own 'device' RLS context.
@@ -35,6 +38,7 @@ export default async function handler(req, res) {
     const mediaHash = sha256(mediaJson);
 
     let deleteUrls = [];
+    let registered = false;
     const commands = await withContext('none', {}, async (t) => {
       // ---- authenticate or register (system context) ----
       await setContext(t, 'system');
@@ -61,6 +65,7 @@ export default async function handler(req, res) {
         await t`update nsignage.devices set secret_hash = ${secretHash} where id = ${deviceId}`;
       }
 
+      registered = Boolean(existing?.owner_id);
       // ---- everything else as this Pi only ----
       await setContext(t, 'device', { device: deviceId });
       await t`
@@ -100,6 +105,7 @@ export default async function handler(req, res) {
       serverTime: Date.now(),
       commands,
       pollSeconds: commands.length ? BUSY_POLL_SECONDS : IDLE_POLL_SECONDS,
+      registered,
     });
   } catch (err) {
     handleError(res, err);

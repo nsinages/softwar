@@ -6,6 +6,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Settings2, LogOut, Tv, Film, UploadCloud } from 'lucide-react';
 import StatusBadge from './StatusBadge';
+import { deviceState } from '../utils/deviceStatus';
 
 const VIA = {
   network: 'Added on the same Wi-Fi',
@@ -85,9 +86,8 @@ export default function CloudDashboardDevices({ devices, statusMap }) {
               {devices.map((d) => {
                 const st = statusMap[d.id];
                 const saved = d.registration === 'saved';
-                const online = st ? st.ok : d.online;
                 const lastSeen = saved ? null : st?.lastSeen || d.lastSeen;
-                const status = saved ? 'saved' : st === undefined && online === undefined ? 'unknown' : online ? 'online' : 'offline';
+                const status = deviceState(d, statusMap);
                 return (
                   <tr key={d.id}>
                     <td data-label="Display"><strong>{d.nickName || d.hostname || d.deviceId}</strong>{d.location ? <div className="muted-sm">{d.location}</div> : null}</td>

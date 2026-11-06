@@ -10,6 +10,13 @@ seconds, so no port forwarding or public IP is needed:
     <- receives queued commands (download a file / delete a file)
     -> reports command results on the next sync
 
+Pairing (agent 1.1): while this Pi is not registered to a customer account,
+the agent fetches a one-time pairing code (POST <cloud>/api/pi/pairing, same
+device secret) and writes it to data/pairing.json. The local player
+(/display, via GET /api/pairing on 127.0.0.1 only) shows it on screen, and the
+customer types it into Add Device on the website. Once the website reports
+the Pi as registered, the code is removed from the file and the screen.
+
 Standard library only. Configure with environment variables (or
 /etc/n-signage.env when run from n-signage-cloud.service):
 
@@ -34,7 +41,9 @@ import urllib.request
 import config
 import device_identity
 
-AGENT_VERSION = '1.0'
+AGENT_VERSION = '1.1'
+# Optional features this agent implements (see docs/PI-AGENT-V2-CONTRACT.md)
+CAPABILITIES = ['pairing']
 CLOUD_URL = os.environ.get('NSIGNAGE_CLOUD_URL', 'https://software.nsinages.in').rstrip('/')
 SECRET_FILE = os.path.join(config.DATA_FOLDER, 'cloud_secret')
 DEFAULT_POLL = 5
@@ -161,6 +170,32 @@ def post_json(url, payload, headers, family=socket.AF_INET):
 
 
 # ---------------------------------------------------------------------------
+# Pairing code — shown on this display so its owner can add it on the website
+# ---------------------------------------------------------------------------
+PAIRING_REFRESH_BEFORE_S = 60   # fetch a new code this long before the current one expires
+PAIRING_RETRY_S = 60            # after a network/server error
+PAIRING_RATE_LIMITED_S = 300    # after HTTP 429
+
+
+def pairing_file():
+    return os.path.join(config.DATA_FOLDER, 'pairing.json')
+
+
+def write_pairing_state(state):
+    """Atomically replace data/pairing.json (read by the local player, app.py)."""
+    os.makedirs(config.DATA_FOLDER, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.pairing-', dir=config.DATA_FOLDER)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(state, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, pairing_file())
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 def unique_target(filename):
@@ -232,6 +267,46 @@ class Agent:
         self.finished = set()  # ids already reported (until the cloud drops them)
         self.lock = threading.Lock()
         self.sync_count = 0
+        self.pairing_registered = None   # last 'registered' value reported by the cloud
+        self.pairing_code_expires = 0.0  # time.monotonic() when the current code expires
+        self.pairing_retry_at = 0.0
+
+    def set_registered(self):
+        if self.pairing_registered is not True:
+            write_pairing_state({'state': 'registered'})
+            log.info('This display is registered to a customer account')
+        self.pairing_registered = True
+        self.pairing_code_expires = 0.0
+
+    def update_pairing(self, registered):
+        """Keep a valid pairing code on screen while the Pi has no owner. Never raises."""
+        if registered is None:
+            return  # website without pairing support: change nothing
+        if registered:
+            self.set_registered()
+            return
+        if self.pairing_registered is not False:
+            log.info('This display is not registered to an account yet; a pairing code will be shown')
+        self.pairing_registered = False
+        now = time.monotonic()
+        if now < self.pairing_code_expires - PAIRING_REFRESH_BEFORE_S or now < self.pairing_retry_at:
+            return
+        try:
+            status, data = post_json(f'{CLOUD_URL}/api/pi/pairing', {'deviceId': self.device_id},
+                                     {'Authorization': f'Bearer {self.secret}'})
+        except OSError as e:
+            status, data = 0, {'error': str(e)}
+        if status == 200 and isinstance(data.get('code'), str):
+            ttl = int(data.get('ttlSeconds') or 600)
+            self.pairing_code_expires = now + ttl
+            write_pairing_state({'state': 'code', 'code': data['code'],
+                                 'expiresAt': int((time.time() + ttl) * 1000)})
+            log.info('New pairing code shown on the display')  # never log the code itself
+        elif status == 409:
+            self.set_registered()  # claimed between the sync and this request
+        else:
+            self.pairing_retry_at = now + (PAIRING_RATE_LIMITED_S if status == 429 else PAIRING_RETRY_S)
+            log.warning(f"Could not get a pairing code (HTTP {status or 'no connection'}); retrying later")
 
     def run_command(self, cmd):
         cid = cmd.get('id')
@@ -273,6 +348,7 @@ class Agent:
             'port': config.PORT,
             'media': list_media(),
             'agentVersion': AGENT_VERSION,
+            'capabilities': CAPABILITIES,
             'results': results,
         }
         headers = {'Authorization': f'Bearer {self.secret}'}
@@ -293,6 +369,10 @@ class Agent:
             sent = {r['id'] for r in results}
             self.results = [r for r in self.results if r['id'] not in sent]
         self.handle_commands(data.get('commands') or [])
+        try:
+            self.update_pairing(data.get('registered'))
+        except Exception as e:  # pairing must never stop media sync
+            log.warning(f'Pairing update failed: {e}')
         return int(data.get('pollSeconds') or DEFAULT_POLL)
 
     def loop(self):

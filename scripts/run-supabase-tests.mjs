@@ -20,5 +20,5 @@ if (!env.DATABASE_URL) { console.error(`${file} has no DATABASE_URL`); process.e
 env.TEST_DATABASE_URL = env.DATABASE_URL;
 const host = new URL(env.DATABASE_URL).hostname;
 console.log(`Testing against Supabase pooler ${host} as ${decodeURIComponent(new URL(env.DATABASE_URL).username).split('.')[0]} (credentials not shown)`);
-const p = spawn(process.execPath, ['--test', '--test-concurrency=1', 'tests/api.test.mjs', 'tests/legacy-agent.test.mjs'], { env, stdio: 'inherit' });
+const p = spawn(process.execPath, ['--test', '--test-concurrency=1', 'tests/api.test.mjs', 'tests/legacy-agent.test.mjs', 'tests/pi-pairing.test.mjs'], { env, stdio: 'inherit' });
 p.on('exit', (code) => process.exit(code ?? 1));

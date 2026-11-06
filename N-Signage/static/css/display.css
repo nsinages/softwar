@@ -79,3 +79,51 @@ html, body {
     transform: rotate(360deg);
   }
 }
+
+/* Pairing code: small corner card over playing media, large when nothing plays */
+.pairing-overlay {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 50;
+  padding: 14px 20px;
+  border-radius: 12px;
+  background: rgba(10, 22, 48, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+  max-width: calc(100vw - 48px);
+}
+
+.pairing-label {
+  font-size: 14px;
+  color: #c9d3e6;
+}
+
+.pairing-code {
+  margin-top: 6px;
+  font-family: "DejaVu Sans Mono", Consolas, monospace;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 6px;
+  color: #ff8a1f;
+}
+
+.pairing-expiry {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8c99b3;
+}
+
+.pairing-overlay.pairing-large {
+  right: 50%;
+  bottom: 12vh;
+  transform: translateX(50%);
+  padding: 24px 40px;
+}
+
+.pairing-overlay.pairing-large .pairing-label { font-size: 20px; }
+.pairing-overlay.pairing-large .pairing-code { font-size: 72px; letter-spacing: 10px; }
+.pairing-overlay.pairing-large .pairing-expiry { font-size: 16px; }

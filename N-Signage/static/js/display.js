@@ -218,3 +218,50 @@
     init();
   }
 })();
+
+/**
+ * Pairing code overlay (cloud agent 1.1+). Independent of playback: it only
+ * reads GET /api/pairing (answered to this Pi's own browser only) and shows
+ * the one-time code while the display is not added to a customer account.
+ * Any error simply hides the overlay.
+ */
+(function () {
+  const POLL_MS = 10000;
+  const overlay = document.getElementById('pairingOverlay');
+  const codeEl = document.getElementById('pairingCode');
+  const expiryEl = document.getElementById('pairingExpiry');
+  const noMedia = document.getElementById('noMediaFallback');
+  const offline = document.getElementById('offlineFallback');
+  if (!overlay || !codeEl) return;
+  let current = null; // { code, expiresAt }
+
+  function render() {
+    const valid = current && current.expiresAt > Date.now();
+    if (!valid) {
+      overlay.style.display = 'none';
+      return;
+    }
+    codeEl.textContent = current.code;
+    const mins = Math.max(1, Math.ceil((current.expiresAt - Date.now()) / 60000));
+    expiryEl.textContent = `One-time code, valid for about ${mins} more minute${mins === 1 ? '' : 's'}`;
+    // big and centred when nothing is playing, small corner card over media
+    const idle = (noMedia && noMedia.style.display !== 'none') || (offline && offline.style.display !== 'none');
+    overlay.classList.toggle('pairing-large', Boolean(idle));
+    overlay.style.display = 'block';
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/pairing', { cache: 'no-store' });
+      const d = r.ok ? await r.json() : null;
+      current = d && d.state === 'code' && typeof d.code === 'string' ? { code: d.code, expiresAt: Number(d.expiresAt) } : null;
+    } catch (err) {
+      current = null;
+    }
+    render();
+  }
+
+  poll();
+  setInterval(poll, POLL_MS);
+  setInterval(render, 2000);
+})();

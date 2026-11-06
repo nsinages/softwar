@@ -20,6 +20,10 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.abspath(os.path.join(HERE, '..', '..', 'N-Signage', 'app'))
 sys.path.insert(0, APP)
+# AGENT_DIR: run a specific cloud_agent.py (e.g. the frozen 1.0 copy in tests/fixtures/agent-1.0);
+# config.py and device_identity.py always come from the current Pi app.
+if os.environ.get('AGENT_DIR'):
+    sys.path.insert(0, os.path.abspath(os.environ['AGENT_DIR']))
 
 if 'pwd' not in sys.modules:
     try:
@@ -39,6 +43,11 @@ config.DATA_FOLDER = os.path.join(work, 'data')
 os.makedirs(config.MEDIA_FOLDER, exist_ok=True)
 
 import cloud_agent  # noqa: E402
+import device_identity  # noqa: E402
+
+# DEVICE_ID: simulate a specific Pi (several simulated Pis can run on one PC)
+if os.environ.get('DEVICE_ID'):
+    device_identity._DEVICE_ID = os.environ['DEVICE_ID']
 
 cloud_agent.SECRET_FILE = os.path.join(config.DATA_FOLDER, 'cloud_secret')
 real_urlopen = cloud_agent.urllib.request.urlopen

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { usePiStatus } from '../hooks/usePiStatus';
 import { getDevices } from '../data/store';
+import { isOnline, isOffline } from '../utils/deviceStatus';
 import DeviceCard from '../components/DeviceCard';
 import CloudDashboardDevices, { WelcomeCard } from '../components/CloudDashboardDevices';
 
@@ -24,9 +25,9 @@ export default function Dashboard({ user, onLogout }) {
   const navigate = useNavigate();
 
   // Derived stats
-  const onlineDevices = devices.filter(d => statusMap[d.id]?.ok === true);
+  const onlineDevices = devices.filter(d => isOnline(d, statusMap));
   // saved records (name + IP, not connected yet) are neither online nor offline
-  const offlineDevices = devices.filter(d => d.registration !== 'saved' && statusMap[d.id] && statusMap[d.id].ok === false);
+  const offlineDevices = devices.filter(d => isOffline(d, statusMap));
   const totalMediaFiles = useMemo(() => {
     return Object.values(statusMap).reduce((acc, curr) => {
       return acc + (curr?.data?.media_count || 0);

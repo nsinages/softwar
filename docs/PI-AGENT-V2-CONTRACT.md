@@ -1,8 +1,12 @@
 # Pi cloud agent — protocol 2 contract (next phase, Pi side)
 
-**Status:** the website side is implemented and tested against a simulated
-protocol-2 Pi. **No Pi code was changed in this phase.** Pis running agent 1.0
-keep working unchanged (tested with the unmodified `cloud_agent.py`).
+**Status:**
+- The website side is implemented and tested against a simulated protocol-2 Pi.
+- **Agent 1.1 (Phase 4) implements §4 pairing codes only.** It announces
+  `capabilities: ["pairing"]` and stays on protocol 1 (no transfer changes).
+  See §4a for the files and how to update a Pi.
+- Pis running agent 1.0 keep working unchanged (tested with a frozen copy of
+  the released 1.0 agent in `tests/fixtures/agent-1.0/`).
 
 Everything below is additive. A Pi announces `protocol: 2` plus the
 capabilities it really implements, and the website uses only those.
@@ -114,6 +118,27 @@ Retry.
   - otherwise at most once per 10 minutes, refreshing shortly before `expiresAt`.
 - **Showing it:** on the signage screen (a non-intrusive overlay, or the setup screen when there is no media) and on the V3 setup portal. Use large characters with the dash. Never log it at INFO level.
 - **Codes are not Pi secrets:** the server invalidates the previous code whenever a new one is issued, and a code is single use.
+
+## 4a. Agent 1.1: what changed on the Pi, and how to update one
+
+The sync response now also carries `registered: true|false` (whether the Pi
+belongs to an account). Agent 1.0 ignores it.
+
+| File (in `/home/nsignage/n-signage`) | Change |
+|---|---|
+| `app/cloud_agent.py` | Version 1.1. Sends `capabilities: ["pairing"]`. While `registered` is false, fetches a code from `/api/pi/pairing` (refreshed 60 s before expiry; retries 60 s after an error, 300 s after HTTP 429) and writes `data/pairing.json` atomically (mode 600). When `registered` is true, overwrites it with `{"state":"registered"}`. If the website does not send `registered` (older website), it does nothing. The code is never logged. |
+| `app/app.py` | New `GET /api/pairing`. It answers **only 127.0.0.1 / ::1** (the kiosk browser); every other address gets 403. No CORS header, `Cache-Control: no-store`, and expired codes are never returned. No other route changed. |
+| `templates/display.html`, `static/js/display.js`, `static/css/display.css` | A pairing-code overlay polls `/api/pairing` every 10 s, in a separate script block from the playlist code. It shows a small corner card over playing media, and a large card when nothing is playing. Any error just hides it. |
+
+Not touched: uploads, media API, playback logic, UDP discovery, the systemd units, the installer, and Wi-Fi onboarding.
+
+**Update a Pi:**
+1. Copy the five files above.
+2. Run `sudo systemctl restart n-signage.service n-signage-cloud.service`.
+3. Reload the kiosk browser, or reboot.
+4. Expect the log line "New pairing code shown on the display" from `journalctl -u n-signage-cloud`.
+
+**Rollback:** copy back the 1.0 versions of the five files and restart the same two services. The website keeps working with 1.0.
 
 ## 5. Device identity (recommended hardening)
 
