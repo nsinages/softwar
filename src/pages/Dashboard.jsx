@@ -16,8 +16,9 @@ import {
 import { usePiStatus } from '../hooks/usePiStatus';
 import { getDevices } from '../data/store';
 import DeviceCard from '../components/DeviceCard';
+import CloudDashboardDevices, { WelcomeCard } from '../components/CloudDashboardDevices';
 
-export default function Dashboard() {
+export default function Dashboard({ user, onLogout }) {
   const devices = useMemo(() => getDevices(), []);
   const { statusMap, isChecking, lastChecked, refresh } = usePiStatus();
   const navigate = useNavigate();
@@ -38,7 +39,7 @@ export default function Dashboard() {
         <div className="page-header-row">
           <div>
             <h1>Dashboard</h1>
-            <p>Overview of all Raspberry Pi signage displays across your network</p>
+            <p>{user ? 'Your Raspberry Pi signage displays' : 'Overview of all Raspberry Pi signage displays across your network'}</p>
           </div>
           <div className="page-header-actions">
             {lastChecked && (
@@ -72,16 +73,20 @@ export default function Dashboard() {
               )}
               <span>{isChecking ? 'Checking…' : 'Refresh Status'}</span>
             </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => navigate('/devices', { state: { openAdd: true } })}
-            >
-              <Plus size={15} />
-              <span>Add Device</span>
-            </button>
+            {!user && (
+              <button
+                className="btn btn-primary"
+                onClick={() => navigate('/devices', { state: { openAdd: true } })}
+              >
+                <Plus size={15} />
+                <span>Add Device</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      {user && <WelcomeCard user={user} deviceCount={devices.length} onLogout={onLogout} />}
 
       {/* Metric Summary Cards */}
       <div className="stat-grid">
@@ -170,7 +175,9 @@ export default function Dashboard() {
           )}
         </div>
 
-        {devices.length === 0 ? (
+        {user ? (
+          <CloudDashboardDevices devices={devices} statusMap={statusMap} />
+        ) : devices.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state-icon">
               <Tv size={28} />

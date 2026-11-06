@@ -11,6 +11,7 @@ const PAGE_TITLES = {
   '/media': { title: 'Media Library', subtitle: 'Browse and manage files on Raspberry Pi storage' },
   '/upload': { title: 'Upload Media', subtitle: 'Deploy images and videos directly to signage displays' },
   '/settings': { title: 'Settings', subtitle: 'System preferences and network configuration' },
+  '/account': { title: 'Account', subtitle: 'Password, sessions, recovery key and preferences' },
 };
 
 export default function TopBar({

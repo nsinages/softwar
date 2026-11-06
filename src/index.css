@@ -1306,3 +1306,63 @@ tbody tr:hover {
 .xfer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .xfer-meta { font-size: var(--text-xs); color: var(--text-muted); display: flex; gap: 10px; flex-wrap: wrap; }
 .xfer-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---- Public pages (hosted website, logged out) ---- */
+.public-page { min-height: 100vh; min-height: 100dvh; background: var(--bg-base); display: flex; flex-direction: column; }
+.public-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 24px; background: var(--bg-card); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+}
+.public-brand img { height: 36px; width: auto; display: block; }
+.public-nav { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.public-link {
+  padding: 7px 12px; border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: var(--weight-medium);
+  color: var(--text-secondary); text-decoration: none;
+}
+.public-link:hover { color: var(--text-primary); background: var(--bg-elevated); }
+.public-link.active { color: var(--accent); }
+.public-link.btn { color: #fff; margin-left: 4px; }
+.public-page .auth-screen { min-height: 0; flex: 1; align-items: flex-start; padding-top: 40px; }
+.home-main { width: 100%; max-width: 1040px; margin: 0 auto; padding: 48px 24px 64px; display: flex; flex-direction: column; gap: 40px; }
+.home-notice { align-self: center; }
+.home-hero { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.home-hero h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); font-weight: var(--weight-bold); color: var(--text-primary); line-height: 1.2; max-width: 680px; }
+.home-hero p { font-size: var(--text-md); color: var(--text-secondary); max-width: 560px; line-height: 1.5; }
+.home-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
+.home-features { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.home-feature { display: flex; gap: 12px; align-items: flex-start; }
+.home-feature h2 { font-size: var(--text-sm); font-weight: var(--weight-semibold); color: var(--text-primary); margin-bottom: 4px; }
+.home-feature p { font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.5; }
+.home-feature-icon {
+  width: 34px; height: 34px; flex-shrink: 0; border-radius: var(--radius-sm);
+  background: var(--accent-subtle); color: var(--accent); display: flex; align-items: center; justify-content: center;
+}
+.pw-rules { margin: 6px 0 0; padding-left: 18px; font-size: var(--text-xs); color: var(--text-muted); display: flex; flex-direction: column; gap: 2px; }
+.pw-rules li.ok { color: var(--success); }
+@media (max-width: 520px) {
+  .public-header { padding: 10px 14px; }
+  .public-brand img { height: 28px; }
+  .public-link { padding: 6px 8px; font-size: var(--text-xs); }
+  .home-main { padding: 28px 16px 48px; gap: 28px; }
+  .public-page .auth-screen { padding-top: 20px; }
+}
+
+/* ---- Customer dashboard ---- */
+.welcome-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: var(--space-4); }
+.welcome-title { font-size: var(--text-lg); font-weight: var(--weight-bold); color: var(--text-primary); }
+.welcome-sub { font-size: var(--text-xs); color: var(--text-secondary); margin-top: 2px; }
+.welcome-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.muted-sm { font-size: var(--text-xs); color: var(--text-muted); }
+.mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+.row-actions { white-space: nowrap; text-align: right; }
+@media (max-width: 720px) {
+  .cloud-devices-table { min-width: 0; }
+  .cloud-devices-table thead { display: none; }
+  .cloud-devices-table tr { display: block; border-bottom: 1px solid var(--border); padding: 8px 0; }
+  .cloud-devices-table td { display: grid; grid-template-columns: 120px 1fr; gap: 8px; border: none; padding: 6px var(--space-4); }
+  .cloud-devices-table td::before { content: attr(data-label); color: var(--text-muted); font-size: var(--text-xs); }
+  .cloud-devices-table td.row-actions { display: flex; justify-content: flex-start; gap: 4px; }
+  .cloud-devices-table td.row-actions::before { content: none; }
+  .welcome-actions .btn { flex: 1 1 auto; justify-content: center; }
+}

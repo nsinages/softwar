@@ -13,6 +13,7 @@ import {
   ChevronRight,
   X,
   LogOut,
+  UserRound,
 } from 'lucide-react';
 import logo from '../assets/logo.png';
 import logoIcon from '../assets/logo-icon.png';
@@ -24,11 +25,16 @@ const MAIN_NAV = [
   { to: '/upload', icon: UploadCloud, label: 'Upload' },
 ];
 
-const BOTTOM_NAV = [
+const BOTTOM_NAV_LAN = [
   { to: '/settings', icon: Settings, label: 'Settings' },
+];
+// Hosted website: the customer's account settings (password, sessions, recovery key)
+const BOTTOM_NAV_CLOUD = [
+  { to: '/account', icon: UserRound, label: 'Account' },
 ];
 
 export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose, user, onLogout }) {
+  const BOTTOM_NAV = user ? BOTTOM_NAV_CLOUD : BOTTOM_NAV_LAN;
   return (
     <>
       {/* Mobile backdrop */}
@@ -85,7 +91,7 @@ export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose
 
           <div className="sidebar-divider" />
 
-          <div className="sidebar-section-title">System</div>
+          <div className="sidebar-section-title">{user ? 'Account' : 'System'}</div>
 
           {BOTTOM_NAV.map(({ to, icon: Icon, label }) => (
             <NavLink

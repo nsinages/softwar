@@ -14,7 +14,8 @@
     "admin": "node scripts/nsignage-admin.mjs",
     "test:supabase": "node scripts/run-supabase-tests.mjs",
     "db:setup": "node scripts/supabase-setup.mjs",
-    "db:migrate-redis": "node scripts/migrate-redis-to-supabase.mjs"
+    "db:migrate-redis": "node scripts/migrate-redis-to-supabase.mjs",
+    "dev:cloud": "node scripts/cloud-dev-server.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.8.2",
