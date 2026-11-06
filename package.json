@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:lan": "vite --mode lan",
     "build": "vite build",
     "start": "node server/index.js",
     "lint": "oxlint src server discovery api shared tests scripts",

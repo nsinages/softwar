@@ -95,7 +95,10 @@ Without a key, anyone on the network can upload or delete media on the Pis
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173 (same proxy + discovery as production)
+npm run dev        # http://localhost:5173 — CUSTOMER website (login, accounts, devices) with the real /api,
+                   #   using DATABASE_URL from .env.supabase-test.local (override: NSIGNAGE_ENV_FILE)
+npm run dev:lan    # http://localhost:5173 — local-network dashboard (no login; Pis on this Wi-Fi via proxy + discovery)
+npm run dev:cloud  # http://localhost:5180 — customer website from a production build (as on Vercel)
 npm run lint
 npm test           # PostgreSQL (in-process) API + RLS + migration tests, Pi agent 1.0 (needs Python 3)
 npm run test:supabase   # same API tests against a real Supabase TEST project
