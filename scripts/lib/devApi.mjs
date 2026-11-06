@@ -3,24 +3,15 @@
 //
 // Development only: `vite build` and Vercel never load this file. It serves the
 // same Vercel-style handlers from api/ that production uses, against the database
-// in DATABASE_URL (read from a git-ignored env file). Nothing here reaches the
+// in DATABASE_URL (from the git-ignored `.env`). Nothing here reaches the
 // browser bundle: only VITE_* variables are exposed by Vite, and none is set here.
 // =============================================
-import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const ROUTES = ['auth', 'devices', 'device', 'find', 'transfer', 'health', 'pi/sync', 'pi/pairing', 'cron/cleanup'];
+export { loadEnvFile } from './env.mjs';
 
-/** Load KEY=value lines into process.env (existing values win). Returns false if the file is missing. */
-export function loadEnvFile(file) {
-  if (!fs.existsSync(file)) return false;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^"(.*)"$/, '$1');
-  }
-  return true;
-}
+const ROUTES = ['auth', 'devices', 'device', 'find', 'transfer', 'health', 'pi/sync', 'pi/pairing', 'cron/cleanup'];
 
 /** Connect-style middleware: /api/<route> → api/<route>.js default export. */
 export function apiMiddleware(root) {

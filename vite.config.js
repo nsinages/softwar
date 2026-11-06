@@ -19,18 +19,16 @@ function lanHelpersPlugin() {
 }
 
 // `npm run dev` = the CUSTOMER website (login, accounts, Supabase) with the real
-// /api functions, like software.nsinages.in. The database comes from the
-// git-ignored env file (default .env.supabase-test.local; override with
-// NSIGNAGE_ENV_FILE). Dev server only: `vite build` never loads it.
+// /api functions, like software.nsinages.in. Secrets come from the single
+// git-ignored `.env` in the project root. Dev server only: `vite build` never loads it.
 function customerApiPlugin() {
   return {
     name: 'n-signage-customer-api',
     async configureServer(server) {
       const root = path.resolve('.')
       const { loadEnvFile, apiMiddleware } = await import('./scripts/lib/devApi.mjs')
-      const envFile = process.env.NSIGNAGE_ENV_FILE || '.env.supabase-test.local'
-      if (!loadEnvFile(envFile) && !process.env.DATABASE_URL) {
-        server.config.logger.warn(`[n-signage] ${envFile} not found: /api will answer "database not configured". See docs/SUPABASE-SETUP.md.`)
+      if (!loadEnvFile() && !process.env.DATABASE_URL) {
+        server.config.logger.warn('[n-signage] .env not found: /api will answer "database not configured". See .env.example.')
       } else if (process.env.DATABASE_URL) {
         const u = new URL(process.env.DATABASE_URL)
         server.config.logger.info(`[n-signage] customer website with /api on ${u.hostname} as ${decodeURIComponent(u.username).split('.')[0]} (credentials not shown)`)

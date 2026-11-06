@@ -39,7 +39,8 @@ Browser ──► /api/auth      username + password accounts (no email), recove
 Media goes browser → cloud relay (temporary copy) → Pi. It is a relay, not
 peer-to-peer, and it is stored only on the Pi.
 
-- **Database (Supabase PostgreSQL), setup, env vars, Preview, deploy, rollback, migration:**
+- **Deploying to software.nsinages.in and rolling back:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- **Database (Supabase PostgreSQL), setup, env vars, migration:**
   [docs/SUPABASE-SETUP.md](docs/SUPABASE-SETUP.md)
 - Accounts, pairing, transfers and staff recovery (behaviour and API):
   [docs/ACCOUNTS-AND-TRANSFERS.md](docs/ACCOUNTS-AND-TRANSFERS.md)
@@ -50,7 +51,7 @@ peer-to-peer, and it is stored only on the Pi.
 
 Quick version:
 
-1. Create a Supabase project in Mumbai and run `npm run db:setup` (see
+1. Create a Supabase project (the live one is in Singapore) and run `npm run db:setup` (see
    docs/SUPABASE-SETUP.md); in Vercel set `DATABASE_URL`, `CRON_SECRET` and
    connect a **public Blob** store (temporary media relay only); redeploy.
    `curl https://software.nsinages.in/api/health` → `"ok":true`.
@@ -96,7 +97,7 @@ Without a key, anyone on the network can upload or delete media on the Pis
 ```bash
 npm install
 npm run dev        # http://localhost:5173 — CUSTOMER website (login, accounts, devices) with the real /api,
-                   #   using DATABASE_URL from .env.supabase-test.local (override: NSIGNAGE_ENV_FILE)
+                   #   using DATABASE_URL from .env (all local secrets live in that one git-ignored file; see .env.example)
 npm run dev:lan    # http://localhost:5173 — local-network dashboard (no login; Pis on this Wi-Fi via proxy + discovery)
 npm run dev:cloud  # http://localhost:5180 — customer website from a production build (as on Vercel)
 npm run lint

@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 // =============================================
-// N Signage — apply the database migration to a Supabase project and create
-// the least-privilege connection for the website.
+// N Signage — apply the database migrations to the Supabase project and give
+// the website's least-privilege role (nsignage_api) a new password.
 //
-//   SUPABASE_ADMIN_URL='postgresql://postgres.<ref>:<db password>@aws-0-ap-south-1.pooler.supabase.com:5432/postgres' \
-//     node scripts/supabase-setup.mjs --env-file .env.supabase-test.local
+//   npm run db:setup
 //
-// SUPABASE_ADMIN_URL: the "Session pooler" connection string from Supabase →
-// Connect (role postgres, port 5432). Used ONLY here, never deployed.
+// Reads SUPABASE_ADMIN_URL from `.env` (the "Session pooler" connection string
+// from Supabase → Connect: role postgres, port 5432). Used ONLY here, never deployed.
 //
 // What it does (all in one transaction):
-//   1. runs every file in supabase/migrations/ (idempotent)
+//   1. runs every file in supabase/migrations/ (idempotent: skips what exists)
 //   2. sets a new random 48-char password for the role nsignage_api
-//   3. writes DATABASE_URL=<transaction pooler URL as nsignage_api> to --env-file
-//      (git-ignored; the password is NEVER printed)
+//   3. updates DATABASE_URL=<transaction pooler URL as nsignage_api> in `.env`
+//      (other lines are kept; the password is NEVER printed)
 //   4. connects as nsignage_api with verify-full TLS and checks role, schema and RLS
-// Re-running rotates the nsignage_api password (update Vercel afterwards).
+// Re-running ROTATES the nsignage_api password: the live website keeps failing
+// until DATABASE_URL is updated in Vercel → Production too, so run it deliberately.
 // =============================================
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,28 +23,12 @@ import crypto from 'node:crypto';
 import postgres from 'postgres';
 import { SUPABASE_ROOT_CA_2021 } from '../api/_lib/supabaseCa.js';
 import { verifyCatalog } from './lib/dbVerify.mjs';
+import { loadEnvFile, setEnvValue, ENV_FILE } from './lib/env.mjs';
 
-// Usage (recommended — the admin URL stays in a git-ignored file, never in the shell history):
-//   npm run db:setup -- --admin-env-file .env.supabase-admin.local --env-file .env.supabase-test.local
-//   where .env.supabase-admin.local has one line: SUPABASE_ADMIN_URL=postgresql://postgres.<ref>:<db password>@<pooler host>:5432/postgres
-
-const args = process.argv.slice(2);
-const envFile = path.resolve(args[args.indexOf('--env-file') + 1] || '.env.supabase.local');
-if (args.includes('--admin-env-file')) {
-  const f = args[args.indexOf('--admin-env-file') + 1];
-  if (!f || !/\.local$/.test(f) || !fs.existsSync(f)) { console.error('Admin env file missing (its name must end in .local).'); process.exit(1); }
-  for (const line of fs.readFileSync(f, 'utf8').split(/\r?\n/)) {
-    const m = /^\s*SUPABASE_ADMIN_URL\s*=\s*(.+?)\s*$/.exec(line);
-    if (m) process.env.SUPABASE_ADMIN_URL = m[1].replace(/^["']|["']$/g, '');
-  }
-}
+loadEnvFile();
 const adminUrl = process.env.SUPABASE_ADMIN_URL;
-if (!adminUrl || args.indexOf('--env-file') < 0) {
-  console.log('Usage: npm run db:setup -- --admin-env-file <admin.local> --env-file <file.local>');
-  process.exit(1);
-}
-if (!/\.local$/.test(envFile)) {
-  console.error('The env file name must end in ".local" so git ignores it.');
+if (!adminUrl) {
+  console.log(`SUPABASE_ADMIN_URL is not set in ${ENV_FILE}. Usage: npm run db:setup`);
   process.exit(1);
 }
 
@@ -83,9 +67,8 @@ await admin.end();
 
 // Transaction pooler (port 6543) as nsignage_api — what the website uses
 const apiUrl = `postgresql://nsignage_api.${ref}:${password}@${u.hostname}:6543/postgres`;
-const lines = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8').split(/\r?\n/).filter((l) => l && !l.startsWith('DATABASE_URL=')) : [];
-fs.writeFileSync(envFile, [...lines, `DATABASE_URL=${apiUrl}`, ''].join('\n'), { mode: 0o600 });
-console.log(`DATABASE_URL for nsignage_api written to ${envFile} (password not shown).`);
+setEnvValue('DATABASE_URL', apiUrl);
+console.log(`DATABASE_URL for nsignage_api updated in ${ENV_FILE} (password not shown). Update Vercel → Production too.`);
 
 // Verify the API connection the way the website will use it
 const api = postgres(apiUrl, { ssl: tls, max: 1, prepare: false, onnotice: () => {} });

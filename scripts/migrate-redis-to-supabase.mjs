@@ -7,7 +7,7 @@
 //   node scripts/migrate-redis-to-supabase.mjs import [file]      snapshot → Supabase (idempotent)
 //   node scripts/migrate-redis-to-supabase.mjs verify [file]      compare snapshot with Supabase, record by record
 //
-// Env (e.g. from `npx vercel env pull .env.local`):
+// Env (in .env, git-ignored):
 //   KV_REST_API_URL + KV_REST_API_READ_ONLY_TOKEN (preferred; or KV_REST_API_TOKEN)  — Redis, READ ONLY
 //   DATABASE_URL                                                                      — Supabase (import/verify)
 //
@@ -18,15 +18,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-function loadEnvFile(file) {
-  if (!fs.existsSync(file)) return;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
-    if (!m || process.env[m[1]] !== undefined) continue;
-    process.env[m[1]] = m[2].replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
-  }
-}
-loadEnvFile(path.resolve('.env.local'));
+import { loadEnvFile } from './lib/env.mjs';
+loadEnvFile();
 
 const { Redis } = await import('@upstash/redis');
 const { redisFromEnv, inspectRedis, exportRedis, importSnapshot, verifySnapshot } = await import('./lib/redisMigration.mjs');

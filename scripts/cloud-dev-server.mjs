@@ -2,8 +2,7 @@
 // =============================================
 // N Signage — run the HOSTED website locally (cloud mode + real /api handlers)
 //
-//   npm run dev:cloud                                   → real Supabase via .env.supabase-test.local
-//   npm run dev:cloud -- --env-file <file.local>        → another env file (DATABASE_URL, BLOB_READ_WRITE_TOKEN …)
+//   npm run dev:cloud                                   → real Supabase (DATABASE_URL etc. from .env)
 //   npm run dev:cloud -- --pglite                       → in-process PostgreSQL with the migration (no Supabase)
 //
 // Builds the site with VITE_CONNECTION_MODE=cloud into .cloud-dist/ and serves
@@ -16,21 +15,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { loadEnvFile, ENV_FILE } from './lib/env.mjs';
 
 const args = process.argv.slice(2);
 const usePglite = args.includes('--pglite');
-const envFile = args.includes('--env-file') ? args[args.indexOf('--env-file') + 1] : '.env.supabase-test.local';
 const PORT = Number(process.env.PORT) || 5180;
 const DIST = path.resolve('.cloud-dist');
 
-function loadEnv(file) {
-  if (!fs.existsSync(file)) return false;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^"(.*)"$/, '$1');
-  }
-  return true;
-}
 
 let testHooks = null;
 if (usePglite) {
@@ -43,8 +34,8 @@ if (usePglite) {
   testHooks = { blob, db };
   console.log('Database: in-process PostgreSQL (PGlite) with supabase/migrations applied');
 } else {
-  if (!loadEnv(envFile)) {
-    console.error(`Missing ${envFile}. Use --pglite, or create it (see docs/SUPABASE-SETUP.md).`);
+  if (!loadEnvFile() || !process.env.DATABASE_URL) {
+    console.error(`Missing DATABASE_URL in ${ENV_FILE}. Use --pglite, or see .env.example.`);
     process.exit(1);
   }
   const u = new URL(process.env.DATABASE_URL);

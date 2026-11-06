@@ -3,7 +3,7 @@
 // N Signage — staff administration (runs on a staff computer, never on the website)
 //
 // Needs DATABASE_URL (the nsignage_api pooler connection). Get it once with:
-//   npx vercel env pull .env.local        (file is git-ignored)
+//   DATABASE_URL comes from .env (git-ignored)
 // then:
 //   npm run admin -- create-customer <username> ["Display name"]   (when NSIGNAGE_REGISTRATION=closed)
 //   npm run admin -- account <username>
@@ -18,18 +18,9 @@
 // them the new key in person or by phone. Staff never see or set passwords.
 // Every action is recorded in nsignage.security_events.
 // =============================================
-import fs from 'node:fs';
-import path from 'node:path';
 
-function loadEnvFile(file) {
-  if (!fs.existsSync(file)) return;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
-    if (!m || process.env[m[1]] !== undefined) continue;
-    process.env[m[1]] = m[2].replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
-  }
-}
-loadEnvFile(path.resolve('.env.local'));
+import { loadEnvFile } from './lib/env.mjs';
+loadEnvFile();
 
 const { asSystem, closeDb } = await import('../api/_lib/db.js');
 const { revokeSessions } = await import('../api/_lib/auth.js');

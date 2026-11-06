@@ -1,5 +1,7 @@
 # N-Signage on Supabase: setup, testing, migration, deployment, rollback
 
+> **Current setup (Phase 6):** one Supabase project (Singapore, ap-southeast-1), is shared by local development and the live domain https://software.nsinages.in (Vercel production branch `main`, functions in `sin1`). All local secrets are in the single git-ignored `.env` (see `.env.example`). The deployment workflow and rollback are in [DEPLOYMENT.md](DEPLOYMENT.md); it supersedes the Preview/Mumbai instructions below.
+
 Branch: **`phase2-supabase`**. The previous Redis implementation is preserved
 unchanged on **`phase2-redis`**, and `main` (production) is untouched.
 Design rationale: [SUPABASE-DESIGN.md](SUPABASE-DESIGN.md). Pi contract:
@@ -15,7 +17,7 @@ Design rationale: [SUPABASE-DESIGN.md](SUPABASE-DESIGN.md). Pi contract:
 | Unmodified Pi agent 1.0 against the new backend | **passes** (real `cloud_agent.py`) |
 | Redis → Supabase migration tool (read-only on Redis) | implemented; **tested** with seeded Redis data |
 | Browser UI (unchanged frontend) on the new backend, Chrome and Edge | **29/29 checks in each** |
-| TLS `verify-full` to the Mumbai pooler | **verified**: the certificate chain checks out against the bundled Supabase Root 2021 CA (`Verify return code: 0`) |
+| TLS `verify-full` to the Singapore pooler | **verified**: the certificate chain checks out against the bundled Supabase Root 2021 CA (`Verify return code: 0`) |
 | **Real Supabase test project** | **NOT YET**. It needs you to create the project (§2). The tests are ready: `npm run test:supabase` |
 | **Vercel Preview with real Supabase** | **NOT YET**. It needs Preview env vars (§4) |
 | Production | **not deployed**; waits for your approval |
@@ -29,11 +31,11 @@ Production today (`main`, commit 18c3de7) has **no database configured**.
 ## 1. Architecture summary
 
 ```
-Browser ──HTTPS──► Vercel functions (region bom1, Mumbai)
+Browser ──HTTPS──► Vercel functions (region sin1, Singapore)
                      │ postgres driver, TLS verify-full, Supavisor TRANSACTION pooler :6543
                      │ every request = 1 transaction:  SET LOCAL ROLE nsignage_api + RLS context
                      ▼
-                  Supabase PostgreSQL (ap-south-1, Mumbai), schema `nsignage` (not exposed via Data API)
+                  Supabase PostgreSQL (ap-southeast-1, Singapore), schema `nsignage` (not exposed via Data API)
 
 Pi (cloud_agent.py) ──HTTPS──► /api/pi/sync  (device secret; RLS context 'device')
 Media bytes ──► Vercel Blob (temporary relay copy) ──► Pi;  copy deleted after the Pi confirms
@@ -48,22 +50,21 @@ Media bytes ──► Vercel Blob (temporary relay copy) ──► Pi;  copy del
 
 1. Go to https://supabase.com/dashboard → **New project**.
    - Name: `nsignage-test`.
-   - **Region: South Asia (Mumbai) – ap-south-1.**
+   - **Region: Southeast Asia (Singapore) – ap-southeast-1** (the region of the existing project).
    - Database password: generate a strong one and keep it in your password manager. It is the *admin* password and is used only in step 3.
    - Plan: Free.
 2. In the project: **Connect** (top bar) → **Session pooler**. Copy the URI. It looks like
-   `postgresql://postgres.<ref>:[YOUR-PASSWORD]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres`.
+   `postgresql://postgres.<ref>:[YOUR-PASSWORD]@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres`.
    (The host may start with `aws-1-`; use exactly what the dashboard shows.)
 3. On this computer, in the project folder (PowerShell):
    ```powershell
-   $env:SUPABASE_ADMIN_URL = 'postgresql://postgres.<ref>:<admin password>@aws-0-ap-south-1.pooler.supabase.com:5432/postgres'
-   npm run db:setup -- --env-file .env.supabase-test.local
-   Remove-Item Env:SUPABASE_ADMIN_URL
+   # put SUPABASE_ADMIN_URL=<session pooler URL> in .env, then:
+   npm run db:setup
    ```
    This:
    - applies the migration;
    - gives the role `nsignage_api` a random 48-character password;
-   - writes `DATABASE_URL=…` (transaction pooler, port 6543, user `nsignage_api.<ref>`) to `.env.supabase-test.local`. That file is git-ignored, and **the password is never printed**;
+   - writes `DATABASE_URL=…` (transaction pooler, port 6543, user `nsignage_api.<ref>`) into `.env` (other lines are kept). That file is git-ignored, and **the password is never printed**;
    - connects as `nsignage_api` with verified TLS and checks the role, schema and RLS.
    
    Expected last line: `OK: least-privilege role, RLS on every table, nothing visible without a context.`
@@ -84,7 +85,7 @@ Media bytes ──► Vercel Blob (temporary relay copy) ──► Pi;  copy del
 
 | Variable | Scope | Required | Value |
 |---|---|---|---|
-| `DATABASE_URL` | Vercel **Preview** (test project) / **Production** (prod project) | **yes** | `postgresql://nsignage_api.<ref>:<password>@aws-0-ap-south-1.pooler.supabase.com:6543/postgres`. Must be the **transaction** pooler (6543) as **`nsignage_api`**. |
+| `DATABASE_URL` | Vercel **Preview** (test project) / **Production** (prod project) | **yes** | `postgresql://nsignage_api.<ref>:<password>@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`. Must be the **transaction** pooler (6543) as **`nsignage_api`**. |
 | `DATABASE_CA_CERT` | Vercel | no | Override for the bundled Supabase Root 2021 CA (valid until 2031-04-26) |
 | `DATABASE_POOL_MAX` | Vercel | no | Client connections per function instance (default 3, max 10) |
 | `BLOB_READ_WRITE_TOKEN` | Vercel | for cloud uploads | Vercel Blob store (temporary relay only) |
@@ -101,10 +102,10 @@ Media bytes ──► Vercel Blob (temporary relay copy) ──► Pi;  copy del
 ## 4. Vercel Preview with the real test database
 
 1. Vercel → Project → **Settings → Environment Variables**. Add, scoped to **Preview** only:
-   - `DATABASE_URL`: the value from `.env.supabase-test.local`;
+   - `DATABASE_URL`: the value from `.env`;
    - `CRON_SECRET`: a random value;
    - `BLOB_READ_WRITE_TOKEN`: connect a Blob store to Preview (Storage → Blob → connect to Preview), so you can test uploads.
-2. **Region:** `vercel.json` sets `"regions": ["bom1"]` (Mumbai), next to Supabase ap-south-1. After the deploy, `/api/health` shows `"region":"bom1"`. If it shows another region, your plan doesn't allow the setting. Database calls then cross continents, so tell me before going live.
+2. **Region:** `vercel.json` sets `"regions": ["sin1"]` (Singapore), next to Supabase ap-southeast-1. After the deploy, `/api/health` shows `"region":"sin1"`. If it shows another region, your plan doesn't allow the setting. Database calls then cross continents, so tell me before going live.
 3. Push the branch. Vercel builds a Preview deployment; it never touches Production:
    ```bash
    git push -u origin phase2-supabase
@@ -126,8 +127,8 @@ Media bytes ──► Vercel Blob (temporary relay copy) ──► Pi;  copy del
 
 ## 5. Production (only after your approval)
 
-1. Create the production project the same way (§2), in **Mumbai**. Use **Pro** once real customers sign up (backups; see §8).
-2. Run `npm run db:setup -- --env-file .env.supabase-prod.local` with the production admin URL.
+1. (Superseded: the existing Singapore project is reused, see DEPLOYMENT.md.) A separate project would be created the same way (§2). Use **Pro** once real customers sign up (backups; see §8).
+2. Run `npm run db:setup` with that project's admin URL in `.env`.
 3. Vercel → Environment Variables, scope **Production**: `DATABASE_URL` (production `nsignage_api` URL), `CRON_SECRET`, and connect the Blob store to Production.
 4. Redis migration: §6. Today there is nothing to migrate.
 5. Merge `phase2-supabase` into `main` and push. Vercel deploys Production.
@@ -148,13 +149,13 @@ Media bytes ──► Vercel Blob (temporary relay copy) ──► Pi;  copy del
 - If no Upstash database exists, **no migration is necessary**.
 - If one exists (for example, created earlier and later disconnected), check it read-only:
   ```bash
-  # .env.local with KV_REST_API_URL + KV_REST_API_READ_ONLY_TOKEN (from Upstash / vercel env pull)
+  # .env with KV_REST_API_URL + KV_REST_API_READ_ONLY_TOKEN (from Upstash / vercel env pull)
   npm run db:migrate-redis -- inspect      # counts only; "no N-Signage data" → nothing to do
   ```
   If it reports data:
   ```bash
   npm run db:migrate-redis -- export       # read-only snapshot → .migration/redis-export.json (git-ignored, owner-only)
-  # with DATABASE_URL of the target project in .env.local:
+  # with DATABASE_URL of the target project in .env:
   npm run db:migrate-redis -- import       # idempotent; never overwrites newer rows
   npm run db:migrate-redis -- verify       # record-by-record check; must print VERIFIED
   ```
@@ -178,11 +179,11 @@ Media bytes ──► Vercel Blob (temporary relay copy) ──► Pi;  copy del
 - **Not used:**
   - the direct connection on port 5432 (IPv6 only, one connection per instance; wrong for serverless);
   - the session pooler on 5432 (holds a connection per client; used only by the setup script).
-- **Latency:** Vercel `bom1` and Supabase `ap-south-1` are both in Mumbai.
+- **Latency:** Vercel `sin1` and Supabase `ap-southeast-1` are both in Singapore.
   - A request makes 1–3 short transactions of a few round trips each, which should be tens of milliseconds.
   - A cold start adds one TLS handshake plus authentication with the pooler.
   - `/api/health` reports `latencyMs`.
-  - **If functions ran in `iad1` (US East) against Mumbai, every round trip would cross continents, and that would be very slow.**
+  - **If functions ran in `iad1` (US East) against Singapore, every round trip would cross continents, and that would be very slow.**
 - **No transaction ever waits on network I/O:** Blob checks happen before the transaction opens, and Blob deletions happen after it commits. Rate limits and failed-login counters commit in their own transaction, so a failed login can't roll them back.
 
 ## 8. Growth: size, egress, connections, backups
@@ -233,7 +234,7 @@ The architecture doesn't depend on Free-plan limits. Moving to Pro is a billing 
 
 ## 10. Staff procedures
 
-The admin script now uses Supabase (`DATABASE_URL` in `.env.local`):
+The admin script now uses Supabase (`DATABASE_URL` in `.env`):
 
 ```bash
 npm run admin -- account <username>
@@ -252,7 +253,7 @@ npm run admin -- unlink-device <deviceId>
 | Requirement | How it's met |
 |---|---|
 | No credentials in frontend | `DATABASE_URL` is read only in `api/_lib/db.js`; `src/` has no database code; no `VITE_` variables for secrets |
-| Verified TLS | `verify-full` with the Supabase Root 2021 CA (fingerprint `80:70:25:AD…CA:FA`, checked against the live Mumbai pooler) |
+| Verified TLS | `verify-full` with the Supabase Root 2021 CA (fingerprint `80:70:25:AD…CA:FA`, checked against the Supabase pooler) |
 | Least privilege | the app connects as `nsignage_api` (no superuser, no BYPASSRLS, no DDL), and also forces `SET LOCAL ROLE nsignage_api` in every transaction |
 | RLS on all tables | 13/13 tables; customers see only their own rows, a Pi only its own; `anon` and `authenticated` have no privileges |
 | Ownership in transactions | claims, pairing redemption, legacy linking and removal are single transactions; single-owner `UPDATE … WHERE owner_id IS NULL` |
