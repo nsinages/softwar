@@ -38,14 +38,25 @@ function readCookie(req, name) {
   return null;
 }
 
+const LOCAL_DEV_HOST_RX = /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$/i;
+
+/**
+ * Local development over plain http (npm run dev / dev:cloud), opened as
+ * localhost or by this computer's LAN address. Never true on Vercel or for an
+ * https request, so the hosted website always uses the strict cookie.
+ */
 function isLocalHost(req) {
+  if (process.env.VERCEL) return false;
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  if (proto === 'https' || req.socket?.encrypted) return false;
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
-  return /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host);
+  return LOCAL_DEV_HOST_RX.test(host);
 }
 
 // "__Host-" cookies must be Secure, Path=/ and have no Domain, so a sibling
-// subdomain cannot set or overwrite them. Plain http://localhost cannot use
-// Secure, so local development uses the unprefixed name.
+// subdomain cannot set or overwrite them. Plain http (local development on
+// localhost or this PC's LAN address) cannot use Secure, so it uses the
+// unprefixed name.
 function accountCookieName(req) {
   return isLocalHost(req) ? 'ns_acct' : '__Host-ns_acct';
 }
