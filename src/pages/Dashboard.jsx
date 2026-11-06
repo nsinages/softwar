@@ -25,7 +25,8 @@ export default function Dashboard({ user, onLogout }) {
 
   // Derived stats
   const onlineDevices = devices.filter(d => statusMap[d.id]?.ok === true);
-  const offlineDevices = devices.filter(d => statusMap[d.id] && statusMap[d.id].ok === false);
+  // saved records (name + IP, not connected yet) are neither online nor offline
+  const offlineDevices = devices.filter(d => d.registration !== 'saved' && statusMap[d.id] && statusMap[d.id].ok === false);
   const totalMediaFiles = useMemo(() => {
     return Object.values(statusMap).reduce((acc, curr) => {
       return acc + (curr?.data?.media_count || 0);

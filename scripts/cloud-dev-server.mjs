@@ -91,6 +91,16 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify(row || null));
         return;
       }
+      if (testHooks && u.pathname === '/__test/sql-devices') {
+        // test-only: what the database holds for a customer (proves server-side persistence)
+        const rows = await testHooks.db.asSystem((t) => t`
+          select d.nickname, host(d.local_ip) as ip, d.registration, u.username as owner
+          from nsignage.devices d join nsignage.users u on u.id = d.owner_id where u.username = ${u.searchParams.get('u')}
+          order by d.added_at`);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(rows));
+        return;
+      }
       const handler = ROUTES[u.pathname];
       if (handler) {
         req.query = Object.fromEntries(u.searchParams);

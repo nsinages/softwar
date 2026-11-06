@@ -10,7 +10,7 @@ import path from 'node:path';
 
 const MIGRATIONS = path.resolve('supabase/migrations');
 
-test('Supabase schema: constraints, RLS and role isolation (40 checks)', { skip: Boolean(process.env.TEST_DATABASE_URL) && 'local PGlite only' }, async () => {
+test('Supabase schema: constraints, RLS and role isolation (all migrations)', { skip: Boolean(process.env.TEST_DATABASE_URL) && 'local PGlite only' }, async () => {
   const { PGlite } = await import('@electric-sql/pglite');
   const db = await PGlite.create();
   const SQL = fs.readdirSync(MIGRATIONS).filter((n) => n.endsWith('.sql')).sort()
@@ -77,7 +77,7 @@ test('Supabase schema: constraints, RLS and role isolation (40 checks)', { skip:
   const ren = await as('user', { user: A }, (tx) => tx.query(`update nsignage.devices set nickname = 'Front Shop' where id = 'aaaaaaaaaaaaaaaa'`));
   ok('Alice can rename her own device', ren.affectedRows === 1);
   await rejects('Alice cannot take ownership of an unclaimed device', () => as('user', { user: A }, (tx) => tx.query(`update nsignage.devices set owner_id = $1, added_at = now() where id = 'aaaaaaaaaaaaaaaa' and false or id = 'aaaaaaaaaaaaaaaa'`, [B])), /ownership|row-level/);
-  await rejects("Alice cannot change her device's secret", () => as('user', { user: A }, (tx) => tx.query(`update nsignage.devices set secret_hash = $1 where id = 'aaaaaaaaaaaaaaaa'`, [H('9')])), /only change nickname/);
+  await rejects("Alice cannot change her device's secret", () => as('user', { user: A }, (tx) => tx.query(`update nsignage.devices set secret_hash = $1 where id = 'aaaaaaaaaaaaaaaa'`, [H('9')])), /only change the name/);
   await rejects("Alice cannot create a transfer to Bob's device", () => as('user', { user: A }, (tx) => tx.query(
     `insert into nsignage.transfers (id, user_id, device_id, filename, size_bytes, sha256, content_type, kind, relay_access, state, expires_at)
      values ('BBBBBBBBBBBBBBBBBBBBBB', $1, 'bbbbbbbbbbbbbbbb', 'a.jpg', 10, $2, 'image/jpeg', 'image', 'public', 'created', now() + interval '2 days')`, [A, H('e')])), /row-level security/);
@@ -134,6 +134,39 @@ test('Supabase schema: constraints, RLS and role isolation (40 checks)', { skip:
     await rejects(`${role} cannot call functions`, () => db.transaction(async (tx) => { await tx.exec(`set local role ${role}`); await tx.query(`select nsignage.rate_limit_hit('x', 'y', 1, 1)`); }), /permission denied/);
   }
 
+
+  // ---- migration 2: saved device records, device events, views ----
+  const SAVED = 'saved_' + 'ab12'.repeat(6);
+  await rejects('customers cannot insert devices directly (only via the API system path)', () => as('user', { user: A }, (tx) => tx.query(
+    `insert into nsignage.devices (id, registration, owner_id, added_at, added_via, nickname, local_ip) values ($1, 'saved', $2, now(), 'manual', 'x', '192.168.1.5')`, [SAVED, A])), /row-level security/);
+  await as('system', {}, (tx) => tx.query(
+    `insert into nsignage.devices (id, registration, owner_id, added_at, added_via, nickname, local_ip) values ($1, 'saved', $2, now(), 'manual', 'Shop Display 01', '192.168.1.120')`, [SAVED, A]));
+  ok('saved device record (name + IP) stored for its owner', true);
+  await rejects('a saved record cannot have a Pi secret', () => as('system', {}, (tx) => tx.query(`update nsignage.devices set secret_hash = $1 where id = $2`, [H('5'), SAVED])), /check constraint/);
+  await rejects('a saved record cannot use a Pi-style id', () => as('system', {}, (tx) => tx.query(
+    `insert into nsignage.devices (id, registration, owner_id, added_at, added_via, nickname) values ('dddddddddddddddd', 'saved', $1, now(), 'manual', 'x')`, [A])), /check constraint/);
+  const ipEdit = await as('user', { user: A }, (tx) => tx.query(`update nsignage.devices set local_ip = '192.168.1.121' where id = $1`, [SAVED]));
+  ok('owner can update the IP of a saved record', ipEdit.affectedRows === 1);
+  await rejects('owner cannot set the IP of a Pi-verified display (Pi reports it)', () => as('user', { user: A }, (tx) => tx.query(`update nsignage.devices set local_ip = '10.0.0.9' where id = 'aaaaaaaaaaaaaaaa'`)), /only change the name/);
+  const bobSaved = await as('user', { user: B }, (tx) => tx.query(`update nsignage.devices set nickname = 'x' where id = $1`, [SAVED]));
+  ok("Bob cannot edit Alice's saved record", bobSaved.affectedRows === 0);
+  await as('system', {}, (tx) => tx.query(`insert into nsignage.device_events (device_id, event_type, ip_address) values ($1, 'saved', '192.168.1.120')`, [SAVED]));
+  const evA = await as('user', { user: A }, (tx) => tx.query('select count(*)::int n from nsignage.device_events'));
+  const evB = await as('user', { user: B }, (tx) => tx.query('select count(*)::int n from nsignage.device_events'));
+  ok('device events visible only to the device owner', evA.rows[0].n >= 1 && evB.rows[0].n === 0);
+  await rejects('a Pi cannot write events for another Pi', () => as('device', { device: 'bbbbbbbbbbbbbbbb' }, (tx) => tx.query(`insert into nsignage.device_events (device_id, event_type) values ('aaaaaaaaaaaaaaaa', 'online')`)), /row-level security/);
+  const vA = await as('user', { user: A }, (tx) => tx.query('select username from nsignage.customers'));
+  ok('view customers respects RLS (own row only)', vA.rows.length === 1 && vA.rows[0].username === 'alice');
+  const vd = await as('user', { user: A }, (tx) => tx.query('select device_name, host(ip_address) ip, status from nsignage.customer_devices order by device_name'));
+  ok('view customer_devices lists only own devices, saved record status "unknown"', vd.rows.some((r) => r.device_name === 'Shop Display 01' && r.ip === '192.168.1.121' && r.status === 'unknown') && vd.rows.every((r) => r.device_name !== 'Office'), JSON.stringify(vd.rows));
+  const vB = await as('user', { user: B }, (tx) => tx.query('select count(*)::int n from nsignage.customer_devices where device_name = $1', ['Shop Display 01']));
+  ok("Bob's customer_devices view does not show Alice's record", vB.rows[0].n === 0);
+  for (const role of ['anon', 'authenticated']) {
+    await rejects(`${role} cannot read the customers view`, () => db.transaction(async (tx) => { await tx.exec(`set local role ${role}`); await tx.query('select * from nsignage.customers'); }), /permission denied/);
+  }
+  const mig = await db.query('select count(*)::int n from nsignage.schema_migrations');
+  ok('schema_migrations records both migrations', mig.rows[0].n === 2);
+
   // --- retention function
   const purge = await as('system', {}, (tx) => tx.query('select nsignage.purge_expired() r'));
   ok('purge_expired runs', typeof purge.rows[0].r === 'object', JSON.stringify(purge.rows[0].r));
@@ -147,5 +180,5 @@ test('Supabase schema: constraints, RLS and role isolation (40 checks)', { skip:
 
   await db.close();
   assert.deepEqual(failures, [], `${failures.length} check(s) failed`);
-  assert.equal(pass, 40);
+  assert.ok(pass >= 52, `expected at least 52 checks, got ${pass}`);
 });

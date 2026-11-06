@@ -2,16 +2,17 @@
 // N Signage — App Root Shell
 //
 // Hosted website (cloud mode):
-//   public  : /  (home)  /login  /register  /recover
-//   private : /  (dashboard)  /devices  /media  /upload  /account (/settings)
+//   public  : /  and /login (sign-in page)  /register  /forgot-password
+//   private : /dashboard  /devices  /media  /upload  /account (/settings)
+//   /logout : signs out (server revokes the session) and returns to /login
 //   Opening a private page while logged out → /login?next=<page>.
 //   Data is protected by the server (every /api call checks the session);
 //   the redirects only decide which screen to show.
 //
 // LAN mode (localhost / npm start): no customer login, works exactly as before.
 // =============================================
-import React, { useState, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
+import React, { useState, useEffect, useRef } from 'react';
+import { BrowserRouter, Routes, Route, Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Compass, Loader2, AlertTriangle, RotateCw } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
@@ -21,7 +22,6 @@ import Media from './pages/Media';
 import Upload from './pages/Upload';
 import Settings from './pages/Settings';
 import AuthPage from './pages/Login';
-import Home from './pages/Home';
 import { getDevices, DEVICES_CHANGED_EVENT } from './data/store';
 import { usePiStatus } from './hooks/usePiStatus';
 import { isCloudMode } from './api/cloudApi';
@@ -38,9 +38,9 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           {/* There is no customer login on the local network dashboard */}
-          <Route path="/login" element={<Navigate to="/" replace />} />
-          <Route path="/register" element={<Navigate to="/" replace />} />
-          <Route path="/recover" element={<Navigate to="/" replace />} />
+          {['/login', '/register', '/recover', '/forgot-password', '/logout'].map((p) => (
+            <Route key={p} path={p} element={<Navigate to="/" replace />} />
+          ))}
           <Route path="*" element={<Shell />} />
         </Routes>
       </BrowserRouter>
@@ -55,7 +55,22 @@ export default function App() {
   );
 }
 
-const PRIVATE_PATHS = ['/devices', '/media', '/upload', '/account', '/settings'];
+const PRIVATE_PATHS = ['/dashboard', '/devices', '/media', '/upload', '/account', '/settings'];
+const AUTH_PATHS = ['/login', '/register', '/forgot-password', '/recover'];
+
+/** /logout: revoke the session on the server, then show the sign-in page. */
+function LogoutRoute() {
+  const auth = useAuth();
+  const done = useRef(false);
+  useEffect(() => {
+    if (!done.current) { done.current = true; auth.logout(); }
+  }, [auth]);
+  return (
+    <div className="boot-screen" aria-busy="true">
+      <Loader2 size={22} style={{ animation: 'spin 0.8s linear infinite', color: 'var(--accent)' }} />
+    </div>
+  );
+}
 
 function CloudRoutes() {
   const auth = useAuth();
@@ -87,21 +102,31 @@ function CloudRoutes() {
     }
     return (
       <Routes>
-        <Route path="/" element={<Home notice={auth.notice} />} />
+        <Route path="/" element={<AuthPage key="login" mode="login" />} />
         <Route path="/login" element={<AuthPage key="login" mode="login" />} />
         <Route path="/register" element={<AuthPage key="register" mode="register" />} />
-        <Route path="/recover" element={<AuthPage key="recover" mode="recover" />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="/forgot-password" element={<AuthPage key="recover" mode="recover" />} />
+        <Route path="/recover" element={<Navigate to="/forgot-password" replace />} />
+        <Route path="/logout" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );
   }
 
-  // Logged in: the public auth pages lead back into the app
-  if (['/login', '/register', '/recover'].includes(location.pathname)) {
+  if (location.pathname === '/logout') return <LogoutRoute />;
+  // Logged in: "/" and the sign-in pages lead into the app
+  if (location.pathname === '/') return <Navigate to="/dashboard" replace />;
+  if (AUTH_PATHS.includes(location.pathname)) {
     const next = new URLSearchParams(location.search).get('next');
-    return <Navigate to={next && next.startsWith('/') && !next.startsWith('//') ? next : '/'} replace />;
+    return <Navigate to={next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard'} replace />;
   }
-  return <Shell user={auth.user} onLogout={auth.logout} loadError={auth.loadError} onRetry={auth.reloadDevices} />;
+  return <CustomerShell />;
+}
+
+function CustomerShell() {
+  const auth = useAuth();
+  const navigate = useNavigate();
+  return <Shell user={auth.user} onLogout={() => navigate('/logout')} loadError={auth.loadError} onRetry={auth.reloadDevices} />;
 }
 
 function Shell({ user, onLogout, loadError, onRetry }) {
@@ -151,6 +176,7 @@ function Shell({ user, onLogout, loadError, onRetry }) {
           )}
           <Routes>
             <Route path="/" element={<Dashboard user={user} onLogout={onLogout} />} />
+            <Route path="/dashboard" element={<Dashboard user={user} onLogout={onLogout} />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/media" element={<Media />} />
             <Route path="/upload" element={<Upload />} />

@@ -31,6 +31,12 @@ export default function StatusBadge({ status = 'unknown', showLabel = true, clas
       cls: 'badge badge-neutral',
       label: 'Unknown',
     },
+    // a device record the customer saved (name + IP) that no Pi has confirmed yet
+    saved: {
+      dot: 'dot',
+      cls: 'badge badge-warning',
+      label: 'Saved · not connected',
+    },
   }[status] ?? {
     dot: 'dot',
     cls: 'badge badge-neutral',

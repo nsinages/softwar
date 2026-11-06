@@ -6,7 +6,7 @@
 // and reacts when the server says the session ended (401 not-logged-in).
 // =============================================
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { getMe, logout as apiLogout, LOGGED_OUT_EVENT } from '../api/authApi';
+import { getMe, getAuthConfig, logout as apiLogout, LOGGED_OUT_EVENT } from '../api/authApi';
 import { syncCloudDevices } from '../api/cloudApi';
 import { replaceDevices } from '../data/store';
 
@@ -15,6 +15,7 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   // state: checking | in | out | error
   const [state, setState] = useState({ status: 'checking', user: null, error: '', loadError: '', notice: '' });
+  const [registration, setRegistration] = useState('open');
 
   /** Logged in: load this account's devices, then show the app. */
   const enter = useCallback(async (user) => {
@@ -45,6 +46,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   useEffect(() => {
+    getAuthConfig().then((c) => setRegistration(c.registration));
     check();
     // Session expired or revoked (logout elsewhere, password changed): back to login
     const onLoggedOut = () => {
@@ -55,7 +57,7 @@ export function AuthProvider({ children }) {
     return () => window.removeEventListener(LOGGED_OUT_EVENT, onLoggedOut);
   }, [check]);
 
-  const value = useMemo(() => ({ ...state, enter, check, logout, reloadDevices }), [state, enter, check, logout, reloadDevices]);
+  const value = useMemo(() => ({ ...state, registration, enter, check, logout, reloadDevices }), [state, registration, enter, check, logout, reloadDevices]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

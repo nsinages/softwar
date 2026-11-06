@@ -223,7 +223,7 @@ export default function Devices() {
       const device = getDevices().find(d => d.id === editId);
       setSubmitting(true);
       setFormError('');
-      cloudRename(device, { name: form.nickName.trim(), location: form.location.trim() }).then(res => {
+      cloudRename(device, { name: form.nickName.trim(), location: form.location.trim(), ip: form.ip.trim() }).then(res => {
         setSubmitting(false);
         if (!res.ok) { setFormError(res.error); return; }
         reload();
@@ -621,10 +621,12 @@ export default function Devices() {
 
             {cloud && !editId ? (
               <CloudAddDevice
-                onAdded={saved => {
+                onAdded={(saved, info) => {
                   reload();
                   closeForm();
-                  setSuccessMsg(`${saved.nickName || saved.hostname || saved.deviceId} was added to your account. You can now manage it from any network.`);
+                  setSuccessMsg(saved.registration === 'saved' && !info?.verified
+                    ? `${saved.nickName} was saved to your account (IP ${saved.ip}). It shows as "Saved · not connected" until the display is verified.`
+                    : `${saved.nickName || saved.hostname || saved.deviceId} was added to your account. You can now manage it from any network.`);
                 }}
               />
             ) : cloud ? (
@@ -641,8 +643,18 @@ export default function Devices() {
                   <input className="form-input" maxLength={80} value={form.location}
                     onChange={e => setForm(f => ({ ...f, location: e.target.value }))} />
                   {errors.location && <span className="form-error">{errors.location}</span>}
-                  <span className="form-hint">Username, hostname and IP address are reported by the Raspberry Pi itself.</span>
+                  {getDevices().find(d => d.id === editId)?.registration !== 'saved' && (
+                    <span className="form-hint">Username, hostname and IP address are reported by the Raspberry Pi itself.</span>
+                  )}
                 </div>
+                {getDevices().find(d => d.id === editId)?.registration === 'saved' && (
+                  <div className="form-group">
+                    <label className="form-label" htmlFor="edit-ip">IP address</label>
+                    <input id="edit-ip" className="form-input" maxLength={45} style={{ fontFamily: 'var(--font-mono)' }} value={form.ip}
+                      onChange={e => setForm(f => ({ ...f, ip: e.target.value }))} />
+                    <span className="form-hint">Saved device (not verified yet). Update the IP address if the display moved to another network.</span>
+                  </div>
+                )}
                 {formError && (
                   <div className="alert alert-danger" style={{ fontSize: 'var(--text-xs)' }}>
                     <AlertTriangle size={14} className="alert-icon" />

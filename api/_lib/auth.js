@@ -14,7 +14,7 @@
 //             nsignage.legacy_browser_sessions / legacy_browser_devices and are
 //             only read by the one-time "link my old devices" flow.
 // =============================================
-import { sha256, randomToken, httpError, DEVICE_ID_RX, deviceFromRow } from './cloud.js';
+import { sha256, randomToken, httpError, DEVICE_ID_RX, SAVED_ID_RX, deviceFromRow } from './cloud.js';
 import { asSystem, setContext, withContext, ms } from './db.js';
 
 const LEGACY_COOKIE = 'ns_session';
@@ -50,16 +50,20 @@ function accountCookieName(req) {
   return isLocalHost(req) ? 'ns_acct' : '__Host-ns_acct';
 }
 
+/** maxAge null → browser-session cookie (deleted when the browser closes). */
 function accountCookie(req, value, maxAge) {
   return [
     `${accountCookieName(req)}=${value}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Strict',
-    `Max-Age=${maxAge}`,
+    ...(maxAge === null ? [] : [`Max-Age=${maxAge}`]),
     ...(isLocalHost(req) ? [] : ['Secure']),
   ].join('; ');
 }
+
+// "Remember me" off: server-side session lasts 12 hours and the cookie is not kept after the browser closes
+export const SHORT_SESSION_TTL_S = 12 * 3600;
 
 const validToken = (t) => typeof t === 'string' && t.length >= 20 && t.length <= 200;
 
@@ -81,7 +85,9 @@ export function userFromRow(r) {
     recoveryKeyCreatedAt: ms(r.recovery_created_at),
     passwordChangedAt: ms(r.password_changed_at),
     createdAt: ms(r.created_at),
-    disabled: Boolean(r.disabled),
+    lastLoginAt: ms(r.last_login_at),
+    accountStatus: r.account_status || (r.disabled ? 'disabled' : 'active'),
+    disabled: Boolean(r.disabled) || (r.account_status && r.account_status !== 'active'),
   };
 }
 
@@ -89,6 +95,8 @@ export const userView = (u) => ({
   id: u.id,
   username: u.username,
   displayName: u.displayName || null,
+  accountStatus: u.accountStatus || 'active',
+  lastLoginAt: u.lastLoginAt || null,
   createdAt: u.createdAt,
   passwordChangedAt: u.passwordChangedAt || null,
   recoveryKeyCreatedAt: u.recoveryKeyCreatedAt || null,
@@ -102,29 +110,34 @@ export async function getUserByUsername(t, username) {
 // ---- Sessions ----------------------------------------------------------------
 
 /** Create a session inside transaction `t` (system context) and set the cookie. */
-export async function createSession(t, req, res, userId) {
+export async function createSession(t, req, res, userId, { remember = true } = {}) {
   const token = randomToken();
   const ua = String(req.headers['user-agent'] || '').slice(0, 160);
-  await t`insert into nsignage.user_sessions (token_hash, user_id, expires_at, user_agent)
-          values (${sha256(token)}, ${userId}, now() + make_interval(secs => ${SESSION_TTL_S}), ${ua})`;
-  // Keep at most MAX_SESSIONS_PER_USER (oldest removed first)
-  await t`delete from nsignage.user_sessions
-          where user_id = ${userId}
-            and token_hash not in (select token_hash from nsignage.user_sessions where user_id = ${userId}
+  const ttl = remember ? SESSION_TTL_S : SHORT_SESSION_TTL_S;
+  await t`insert into nsignage.user_sessions (token_hash, user_id, expires_at, user_agent, persistent)
+          values (${sha256(token)}, ${userId}, now() + make_interval(secs => ${ttl}), ${ua}, ${remember})`;
+  // Keep at most MAX_SESSIONS_PER_USER active sessions (oldest revoked first)
+  await t`update nsignage.user_sessions set revoked_at = now()
+          where user_id = ${userId} and revoked_at is null
+            and token_hash not in (select token_hash from nsignage.user_sessions
+                                   where user_id = ${userId} and revoked_at is null
                                    order by created_at desc limit ${MAX_SESSIONS_PER_USER})`;
-  res.setHeader('Set-Cookie', accountCookie(req, token, SESSION_TTL_S));
+  await t`update nsignage.users set last_login_at = now() where id = ${userId}`;
+  res.setHeader('Set-Cookie', accountCookie(req, token, remember ? ttl : null));
 }
 
+/** Log out: the session is revoked in the database (kept 7 days for audit) and the cookie cleared. */
 export async function destroySession(req, res) {
   const hash = sessionHash(req);
-  if (hash) await asSystem((t) => t`delete from nsignage.user_sessions where token_hash = ${hash}`);
+  if (hash) await asSystem((t) => t`update nsignage.user_sessions set revoked_at = now() where token_hash = ${hash} and revoked_at is null`);
   res.setHeader('Set-Cookie', accountCookie(req, '', 0));
 }
 
-/** Delete every session of an account except `keepHash`. Returns the number removed. */
+/** Revoke every active session of an account except `keepHash`. Returns the number revoked. */
 export async function revokeSessions(t, userId, keepHash = null) {
-  const rows = await t`delete from nsignage.user_sessions
-                       where user_id = ${userId} and token_hash <> ${keepHash || ''} returning 1`;
+  const rows = await t`update nsignage.user_sessions set revoked_at = now()
+                       where user_id = ${userId} and token_hash <> ${keepHash || ''} and revoked_at is null
+                       returning 1`;
   return rows.length;
 }
 
@@ -134,7 +147,8 @@ async function lookupSession(t, hash) {
   const [r] = await t`
     select s.token_hash, s.last_seen_at, u.*
     from nsignage.user_sessions s join nsignage.users u on u.id = s.user_id
-    where s.token_hash = ${hash} and s.expires_at > now() and not u.disabled`;
+    where s.token_hash = ${hash} and s.expires_at > now() and s.revoked_at is null
+      and not u.disabled and u.account_status = 'active'`;
   if (!r) return null;
   if (Date.now() - ms(r.last_seen_at) > LAST_SEEN_EVERY_MS) {
     await t`update nsignage.user_sessions set last_seen_at = now() where token_hash = ${hash}`;
@@ -174,8 +188,10 @@ export async function withCustomer(req, fn) {
 // ---- Device ownership --------------------------------------------------------
 
 /** A Pi owned by the current customer (RLS context 'user'), or 404. */
-export async function requireOwnedDevice(t, user, deviceId) {
-  if (!DEVICE_ID_RX.test(deviceId || '')) throw httpError(400, 'Invalid device id');
+export async function requireOwnedDevice(t, user, deviceId, { allowSaved = false } = {}) {
+  if (!(DEVICE_ID_RX.test(deviceId || '') || (allowSaved && SAVED_ID_RX.test(deviceId || '')))) {
+    throw httpError(400, 'Invalid device id');
+  }
   const [r] = await t`select * from nsignage.devices where id = ${deviceId} and owner_id = ${user.id}`;
   if (!r) throw httpError(404, 'This Raspberry Pi is not registered to your account.', 'not-owner');
   return deviceFromRow(r);
@@ -205,6 +221,16 @@ export async function linkDevice(t, user, deviceId, { name, location, via }) {
   }
   await t`insert into nsignage.security_events (event, user_id, device_id, detail)
           values ('device-linked', ${user.id}, ${deviceId}, ${t.json({ via })})`;
+  await t`insert into nsignage.device_events (device_id, event_type, ip_address, details)
+          values (${deviceId}, 'registered', ${r.local_ip}, ${t.json({ via })})`;
+  // A record this customer saved earlier for this Pi (same expected UID) is now replaced by the verified one
+  const merged = await t`delete from nsignage.devices
+                         where owner_id = ${user.id} and registration = 'saved' and expected_device_uid = ${deviceId}
+                         returning nickname`;
+  if (merged.length && !name) {
+    const [m] = await t`update nsignage.devices set nickname = ${merged[0].nickname} where id = ${deviceId} returning *`;
+    Object.assign(r, m);
+  }
   // back to the customer's own context for the rest of the request
   await setContext(t, 'user', { user: user.id });
   console.log('[N-SIGNAGE CLOUD] device linked', JSON.stringify({ user: user.id, deviceId, via }));

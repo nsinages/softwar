@@ -67,7 +67,10 @@ export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose
         <nav className="sidebar-nav">
           <div className="sidebar-section-title">Menu</div>
 
-          {MAIN_NAV.map(({ to, icon: Icon, label }) => (
+          {MAIN_NAV.map(({ to: path, icon: Icon, label }) => {
+            // the customer dashboard lives at /dashboard on the hosted site
+            const to = user && path === '/' ? '/dashboard' : path;
+            return (
             <NavLink
               key={to}
               to={to}
@@ -87,7 +90,8 @@ export default function Sidebar({ collapsed, onToggle, mobileOpen, onMobileClose
                 </>
               )}
             </NavLink>
-          ))}
+            );
+          })}
 
           <div className="sidebar-divider" />
 

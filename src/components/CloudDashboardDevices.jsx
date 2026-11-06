@@ -13,6 +13,7 @@ const VIA = {
   'legacy+network': 'Linked from this browser (Wi-Fi verified)',
   'legacy+pairing-code': 'Linked from this browser (code verified)',
   migrated: 'Migrated',
+  manual: 'Saved by you (name + IP)',
   admin: 'Added by support',
 };
 
@@ -72,6 +73,7 @@ export default function CloudDashboardDevices({ devices, statusMap }) {
               <tr>
                 <th>Display</th>
                 <th>Device ID</th>
+                <th>Last known IP</th>
                 <th>Hostname</th>
                 <th>Registration</th>
                 <th>Status</th>
@@ -82,22 +84,32 @@ export default function CloudDashboardDevices({ devices, statusMap }) {
             <tbody>
               {devices.map((d) => {
                 const st = statusMap[d.id];
+                const saved = d.registration === 'saved';
                 const online = st ? st.ok : d.online;
-                const lastSeen = st?.lastSeen || d.lastSeen;
+                const lastSeen = saved ? null : st?.lastSeen || d.lastSeen;
+                const status = saved ? 'saved' : st === undefined && online === undefined ? 'unknown' : online ? 'online' : 'offline';
                 return (
                   <tr key={d.id}>
                     <td data-label="Display"><strong>{d.nickName || d.hostname || d.deviceId}</strong>{d.location ? <div className="muted-sm">{d.location}</div> : null}</td>
-                    <td data-label="Device ID" className="mono">{d.piDeviceId}</td>
+                    <td data-label="Device ID" className="mono">{saved ? (d.expectedDeviceUid || '— not verified —') : d.piDeviceId}</td>
+                    <td data-label="Last known IP" className="mono">{d.ip || '—'}</td>
                     <td data-label="Hostname">{d.hostname || '—'}</td>
                     <td data-label="Registration">
                       <div>{VIA[d.addedVia] || 'Registered'}</div>
                       {d.createdAt && <div className="muted-sm">{new Date(d.createdAt).toLocaleDateString('en-IN', { dateStyle: 'medium' })}</div>}
                     </td>
-                    <td data-label="Status"><StatusBadge status={st === undefined && online === undefined ? 'unknown' : online ? 'online' : 'offline'} /></td>
-                    <td data-label="Last connection">{ago(lastSeen)}</td>
+                    <td data-label="Status"><StatusBadge status={status} /></td>
+                    <td data-label="Last connection">{saved ? 'No connection yet' : ago(lastSeen)}</td>
                     <td className="row-actions">
-                      <button className="btn btn-ghost btn-sm" title="Media on this display" onClick={() => navigate('/media', { state: { deviceId: d.id } })}><Film size={14} /> Media</button>
-                      <button className="btn btn-ghost btn-sm" title="Upload to this display" onClick={() => navigate('/upload', { state: { preselectDeviceId: d.id } })}><UploadCloud size={14} /> Upload</button>
+                      {saved ? (
+                        <button className="btn btn-ghost btn-sm" title="Verify this display" onClick={() => navigate('/devices', { state: { openAdd: true } })}><Plus size={14} /> Verify</button>
+                      ) : (
+                        <>
+                          <button className="btn btn-ghost btn-sm" title="Media on this display" onClick={() => navigate('/media', { state: { deviceId: d.id } })}><Film size={14} /> Media</button>
+                          <button className="btn btn-ghost btn-sm" title="Upload to this display" onClick={() => navigate('/upload', { state: { preselectDeviceId: d.id } })}><UploadCloud size={14} /> Upload</button>
+                        </>
+                      )}
+                      <button className="btn btn-ghost btn-sm" title="Rename or remove" onClick={() => navigate('/devices', { state: { editId: d.id } })}><Settings2 size={14} /> Manage</button>
                     </td>
                   </tr>
                 );
@@ -106,6 +118,24 @@ export default function CloudDashboardDevices({ devices, statusMap }) {
           </table>
         </div>
       )}
+
+      <section className="media-section" aria-labelledby="media-section-title">
+        <h2 id="media-section-title">Media</h2>
+        <div className="media-section-grid">
+          <button className="card media-action" onClick={() => navigate('/upload')}>
+            <UploadCloud size={20} />
+            <span><strong>Upload media</strong><small>Send images and videos to your displays</small></span>
+          </button>
+          <button className="card media-action" onClick={() => navigate('/media')}>
+            <Film size={20} />
+            <span><strong>Media library</strong><small>See and delete the files on each display</small></span>
+          </button>
+          <button className="card media-action" onClick={() => navigate('/devices')}>
+            <Settings2 size={20} />
+            <span><strong>Manage devices</strong><small>Rename, verify or remove displays</small></span>
+          </button>
+        </div>
+      </section>
     </>
   );
 }

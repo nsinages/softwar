@@ -7,6 +7,7 @@ import { User, Menu } from 'lucide-react';
 
 const PAGE_TITLES = {
   '/': { title: 'Dashboard', subtitle: 'Overview of all digital signage devices' },
+  '/dashboard': { title: 'Dashboard', subtitle: 'Your displays at a glance' },
   '/devices': { title: 'Devices', subtitle: 'Manage and monitor your Raspberry Pi signage devices' },
   '/media': { title: 'Media Library', subtitle: 'Browse and manage files on Raspberry Pi storage' },
   '/upload': { title: 'Upload Media', subtitle: 'Deploy images and videos directly to signage displays' },

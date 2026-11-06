@@ -90,7 +90,11 @@ function toStoreDevice(d) {
     id: `cloud-${d.deviceId}`,
     cloud: true,
     piDeviceId: d.deviceId,
-    deviceId: d.username,
+    uid: d.uid || null,
+    // 'verified' = a real Pi confirmed it; 'saved' = name + IP saved by the customer, not connected yet
+    registration: d.registration || 'verified',
+    expectedDeviceUid: d.expectedDeviceUid || null,
+    deviceId: d.username || d.name || 'Saved device',
     nickName: d.name || '',
     location: d.location || '',
     hostname: d.hostname || undefined,
@@ -134,6 +138,20 @@ export async function cloudClaim(claimNonce, { name, location } = {}) {
   }
 }
 
+/**
+ * Add Device by name + IP (optional hostname, device UID, pairing code).
+ * Without a pairing code the record is saved but NOT verified (status unknown).
+ */
+export async function cloudSaveDevice(fields) {
+  try {
+    const res = await axios.post('/api/devices?action=save', fields, { timeout: 20000 });
+    await syncCloudDevices();
+    return { ok: true, verified: res.data.verified, device: toStoreDevice(res.data.device) };
+  } catch (error) {
+    return { ok: false, reason: error.response?.data?.reason, error: error.response?.data?.error || cloudError(error, 'Saving the device') };
+  }
+}
+
 /** Add Device with the one-time pairing code shown on the display. */
 export async function cloudPair(code, { name, location } = {}) {
   try {
@@ -165,9 +183,11 @@ export async function cloudLinkLegacy(deviceId, code = '') {
   }
 }
 
-export async function cloudRename(device, { name, location }) {
+export async function cloudRename(device, { name, location, ip }) {
   try {
-    await axios.patch(`/api/devices?deviceId=${encodeURIComponent(device.piDeviceId)}`, { name, location }, { timeout: 15000 });
+    // IP can only be changed for a saved record (a verified Pi reports its own IP)
+    const body = { name, location, ...(device.registration === 'saved' && ip !== undefined && { ip }) };
+    await axios.patch(`/api/devices?deviceId=${encodeURIComponent(device.piDeviceId)}`, body, { timeout: 15000 });
     await syncCloudDevices();
     return { ok: true };
   } catch (error) {
@@ -194,7 +214,7 @@ export async function cloudStatus(device) {
     const latency = Date.now() - start;
     return res.data.ok
       ? { ok: true, data: res.data.data, latency, lastSeen: res.data.lastSeen }
-      : { ok: false, error: res.data.error, data: res.data.data, latency, lastSeen: res.data.lastSeen };
+      : { ok: false, saved: Boolean(res.data.saved), error: res.data.error, data: res.data.data, latency, lastSeen: res.data.lastSeen };
   } catch (error) {
     return { ok: false, error: cloudError(error, 'Status check'), latency: Date.now() - start };
   }

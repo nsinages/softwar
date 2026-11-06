@@ -22,12 +22,25 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import postgres from 'postgres';
 import { SUPABASE_ROOT_CA_2021 } from '../api/_lib/supabaseCa.js';
+import { verifyCatalog } from './lib/dbVerify.mjs';
+
+// Usage (recommended — the admin URL stays in a git-ignored file, never in the shell history):
+//   npm run db:setup -- --admin-env-file .env.supabase-admin.local --env-file .env.supabase-test.local
+//   where .env.supabase-admin.local has one line: SUPABASE_ADMIN_URL=postgresql://postgres.<ref>:<db password>@<pooler host>:5432/postgres
 
 const args = process.argv.slice(2);
 const envFile = path.resolve(args[args.indexOf('--env-file') + 1] || '.env.supabase.local');
+if (args.includes('--admin-env-file')) {
+  const f = args[args.indexOf('--admin-env-file') + 1];
+  if (!f || !/\.local$/.test(f) || !fs.existsSync(f)) { console.error('Admin env file missing (its name must end in .local).'); process.exit(1); }
+  for (const line of fs.readFileSync(f, 'utf8').split(/\r?\n/)) {
+    const m = /^\s*SUPABASE_ADMIN_URL\s*=\s*(.+?)\s*$/.exec(line);
+    if (m) process.env.SUPABASE_ADMIN_URL = m[1].replace(/^["']|["']$/g, '');
+  }
+}
 const adminUrl = process.env.SUPABASE_ADMIN_URL;
 if (!adminUrl || args.indexOf('--env-file') < 0) {
-  console.log('Usage: SUPABASE_ADMIN_URL=<session pooler URL as postgres> node scripts/supabase-setup.mjs --env-file <file.local>');
+  console.log('Usage: npm run db:setup -- --admin-env-file <admin.local> --env-file <file.local>');
   process.exit(1);
 }
 if (!/\.local$/.test(envFile)) {
@@ -56,6 +69,11 @@ try {
     }
     await t.unsafe(`alter role nsignage_api with password '${password}'`); // base64url: no quotes possible
   });
+  const v = await verifyCatalog(admin);
+  console.log('Catalog verification (as project owner):');
+  console.log(JSON.stringify(v.report, null, 2));
+  console.log(v.ok ? 'CATALOG OK: all required tables, views, foreign keys, indexes and migrations exist.' : `CATALOG PROBLEMS:\n - ${v.problems.join('\n - ')}`);
+  if (!v.ok) process.exitCode = 1;
 } catch (err) {
   console.error('Migration failed:', err.code || '', err.message);
   await admin.end();

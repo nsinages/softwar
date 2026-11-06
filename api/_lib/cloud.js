@@ -28,6 +28,8 @@ const STALE_SECRET_MS = 10 * 60_000;             // unclaimed Pi offline this lo
 
 export const USERNAME_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
 export const DEVICE_ID_RX = /^[a-f0-9]{16}$/;
+/** A device record a customer saved by name + IP that no Pi has confirmed yet. */
+export const SAVED_ID_RX = /^saved_[a-f0-9]{24}$/;
 const HOSTNAME_RX = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 const IPV4_RX = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 export const MEDIA_NAME_RX = /^[A-Za-z0-9][A-Za-z0-9._ ()-]{0,200}\.(jpg|jpeg|png|gif|webp|bmp|mp4|m4v|webm|mov|avi|mkv)$/i;
@@ -162,7 +164,12 @@ export function deviceFromRow(r) {
     mediaHash: r.media_hash || null,
     currentMedia: r.current_media || null,
     firstSeen: ms(r.first_seen_at),
-    lastSeen: ms(r.last_seen_at),
+    lastSeen: r.registration === 'saved' ? null : ms(r.last_seen_at),
+    uid: r.uid || null,
+    registration: r.registration || 'verified',
+    deviceModel: r.device_model || null,
+    connectionType: r.connection_type || null,
+    expectedDeviceUid: r.expected_device_uid || null,
   };
 }
 
@@ -175,14 +182,20 @@ export function canReplaceSecret(device, owned, now = Date.now()) {
 }
 
 export function publicView(device, now = Date.now()) {
+  const saved = device.registration === 'saved';
   return {
     deviceId: device.deviceId,
+    uid: device.uid || null,
+    registration: device.registration || 'verified',
+    deviceModel: device.deviceModel || null,
+    connectionType: device.connectionType || null,
     username: device.username,
     hostname: device.hostname || null,
     ip: device.localIp || null,
     port: device.port || 5000,
-    online: isOnline(device, now),
-    status: isOnline(device, now) ? 'online' : 'offline',
+    online: saved ? false : isOnline(device, now),
+    // 'unknown' for a saved record: no Pi has confirmed it, so there is no heartbeat to judge by
+    status: saved ? 'unknown' : isOnline(device, now) ? 'online' : 'offline',
     lastSeen: device.lastSeen || null,
     agentVersion: device.agentVersion || null,
     capabilities: device.capabilities || [],

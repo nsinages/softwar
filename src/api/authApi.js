@@ -16,6 +16,16 @@ function message(error, fallback) {
   return fallback;
 }
 
+/** Is self-registration open? ('open' | 'closed'; accounts are then created by staff) */
+export async function getAuthConfig() {
+  try {
+    const res = await axios.get('/api/auth?action=config', { timeout: 15000 });
+    return { registration: res.data.registration === 'closed' ? 'closed' : 'open' };
+  } catch {
+    return { registration: 'open' };
+  }
+}
+
 /** @returns {Promise<{ok:true,user:object}|{ok:false,loggedOut?:boolean,error?:string}>} */
 export async function getMe() {
   try {
@@ -36,7 +46,7 @@ async function post(action, body, fallback) {
   }
 }
 
-export const login = (username, password) => post('login', { username, password }, 'Login failed.');
+export const login = (username, password, remember = true) => post('login', { username, password, remember }, 'Login failed.');
 export const register = (username, password, displayName) =>
   post('register', { username, password, displayName }, 'Could not create the account.');
 export const logout = () => post('logout', {}, 'Logout failed.');

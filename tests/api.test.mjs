@@ -624,6 +624,140 @@ test('transfer list and views never expose relay URLs or owner ids', async () =>
   assert.equal(l.body.transfers[0].relay, 'cloud');
 });
 
+// ---- Add Device by name + IP, persistence, next-login restoration ----------------
+
+const save = (client, body) => client.call(devices, { method: 'POST', query: { action: 'save' }, body });
+
+test('Add Device by name + IP is saved in PostgreSQL for the logged-in customer only', async () => {
+  const shop = new Client('shop-owner'); await register(shop, 'shop.owner.save');
+  // validation
+  assert.equal((await save(shop, { name: '', ip: '192.168.1.120' })).body.reason, 'bad-name');
+  assert.equal((await save(shop, { name: 'Shop Display 01', ip: '' })).body.reason, 'bad-ip');
+  assert.equal((await save(shop, { name: 'Shop Display 01', ip: '192.168.1.300' })).body.reason, 'bad-ip');
+  assert.equal((await save(shop, { name: 'Shop Display 01', ip: '192.168.1.0/24' })).body.reason, 'bad-ip');
+  assert.equal((await save(shop, { name: 'Shop Display 01', ip: '192.168.1.120', hostname: 'bad host!' })).body.reason, 'bad-hostname');
+  assert.equal((await save(shop, { name: 'Shop Display 01', ip: '192.168.1.120', deviceUid: 'xyz' })).body.reason, 'bad-uid');
+  // a browser-supplied owner id is ignored: ownership comes from the session
+  const other = new Client('other'); const otherReg = await register(other, 'other.customer.save');
+  const r = await save(shop, { name: 'Shop Display 01', ip: '192.168.1.120', hostname: 'shop-pi', customer_id: otherReg.body.user.id, owner_id: otherReg.body.user.id });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.verified, false);
+  assert.equal(r.body.device.registration, 'saved');
+  assert.equal(r.body.device.status, 'unknown', 'an IP address alone proves nothing: status unknown');
+  assert.equal(r.body.device.online, false);
+  const id = r.body.device.deviceId;
+  assert.match(id, /^saved_[a-f0-9]{24}$/);
+  created.devices.add(id);
+  const [row] = await sql((t) => t`select d.nickname, host(d.local_ip) as ip, d.hostname, d.registration, u.username
+                                   from nsignage.devices d join nsignage.users u on u.id = d.owner_id where d.id = ${id}`);
+  assert.deepEqual({ ...row }, { nickname: 'Shop Display 01', ip: '192.168.1.120', hostname: 'shop-pi', registration: 'saved', username: 'shop.owner.save' });
+  const [view] = await sql((t) => t`select device_name, host(ip_address) ip, status from nsignage.customer_devices where device_uid = ${id}`);
+  assert.deepEqual({ ...view }, { device_name: 'Shop Display 01', ip: '192.168.1.120', status: 'unknown' });
+  const events = await sql((t) => t`select event_type from nsignage.device_events where device_id = ${id}`);
+  assert.deepEqual(events.map((e) => e.event_type), ['saved']);
+  assert.equal((await save(shop, { name: 'Again', ip: '192.168.1.120' })).body.reason, 'duplicate');
+
+  // logout → login again → the saved device is listed again (from the database)
+  await shop.call(auth, { method: 'POST', query: { action: 'logout' } });
+  assert.equal((await shop.call(devices)).status, 401);
+  await shop.call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'shop.owner.save', password: PASSWORD } });
+  const again = (await shop.call(devices)).body.devices.find((d) => d.deviceId === id);
+  assert.equal(again.name, 'Shop Display 01');
+  assert.equal(again.ip, '192.168.1.120');
+  // another computer, same account
+  const laptop = new Client('laptop');
+  await laptop.call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'shop.owner.save', password: PASSWORD } });
+  assert.ok((await laptop.call(devices)).body.devices.some((d) => d.deviceId === id && d.ip === '192.168.1.120'));
+
+  // the other customer can't see, edit or delete it
+  assert.equal((await other.call(devices)).body.devices.length, 0);
+  assert.equal((await other.call(devices, { method: 'PATCH', query: { deviceId: id }, body: { name: 'mine' } })).status, 404);
+  assert.equal((await other.call(devices, { method: 'DELETE', query: { deviceId: id } })).status, 404);
+  assert.equal((await other.call(device, { query: { deviceId: id, action: 'status' } })).status, 404);
+
+  // owner edits the IP when the network changes; status endpoint is honest
+  const upd = await shop.call(devices, { method: 'PATCH', query: { deviceId: id }, body: { ip: '192.168.1.121' } });
+  assert.equal(upd.body.device.ip, '192.168.1.121');
+  const st = await shop.call(device, { query: { deviceId: id, action: 'status' } });
+  assert.equal(st.body.saved, true); assert.equal(st.body.ok, false);
+  // no uploads to an unverified record
+  const tr = await shop.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: id, filename: 'a.jpg', size: 10, sha256: sha('a') } });
+  assert.equal(tr.status, 409); assert.equal(tr.body.reason, 'device-not-verified');
+  // removal deletes the record
+  assert.equal((await shop.call(devices, { method: 'DELETE', query: { deviceId: id } })).status, 200);
+  assert.equal((await sql((t) => t`select count(*)::int n from nsignage.devices where id = ${id}`))[0].n, 0);
+});
+
+test('Add Device with name + IP + pairing code verifies the real Pi and replaces a matching saved record', async () => {
+  const c = new Client('verifier', '198.51.100.233'); await register(c, 'verify.owner');
+  const pi = new Pi('198.51.100.234'); await pi.sync();
+  const saved = await save(c, { name: 'Lobby Screen', ip: '192.168.1.50', deviceUid: pi.deviceId });
+  assert.equal(saved.body.device.registration, 'saved');
+  created.devices.add(saved.body.device.deviceId);
+  const { code } = (await pi.requestCode()).body;
+  const v = await save(c, { name: '', ip: '192.168.1.50', code }).catch(() => null);
+  assert.equal(v.body.reason, 'bad-name', 'name still required');
+  const ok = await save(c, { name: 'Lobby Screen', ip: '192.168.1.50', code });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.verified, true);
+  assert.equal(ok.body.device.deviceId, pi.deviceId);
+  assert.equal(ok.body.device.registration, 'verified');
+  const list = (await c.call(devices)).body.devices;
+  assert.equal(list.length, 1, 'the saved placeholder was merged into the verified display');
+  assert.equal(list[0].name, 'Lobby Screen');
+  const ev = await sql((t) => t`select event_type from nsignage.device_events where device_id = ${pi.deviceId} order by created_at`);
+  assert.ok(ev.some((e) => e.event_type === 'registered'));
+});
+
+test('device events: Pi coming online and IP changes are recorded (not every heartbeat)', async () => {
+  const { pi } = await ownerWithPi('events.owner');
+  await pi.sync(); await pi.sync();
+  await pi.sync({ localIp: '192.168.1.77' });
+  const ev = await sql((t) => t`select event_type, host(ip_address) ip from nsignage.device_events where device_id = ${pi.deviceId} order by created_at`);
+  const types = ev.map((e) => e.event_type);
+  assert.equal(types.filter((x) => x === 'online').length, 1, `one online event, got ${types}`);
+  assert.ok(ev.some((e) => e.event_type === 'ip-changed' && e.ip === '192.168.1.77'));
+  assert.ok(types.includes('registered'));
+});
+
+test('remember me off → short browser-session cookie; logout keeps an audit row with revoked_at', async () => {
+  await register(new Client('rm'), 'remember.me.user');
+  const c = new Client('rm2');
+  const r = await c.call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'remember.me.user', password: PASSWORD, remember: false } });
+  assert.equal(r.status, 200);
+  assert.doesNotMatch(r.headers['set-cookie'], /Max-Age/, 'browser-session cookie');
+  const [s] = await sql((t) => t`select persistent, extract(epoch from s.expires_at - s.created_at)::int as ttl from nsignage.user_sessions s
+                                 join nsignage.users u on u.id = s.user_id where u.username = 'remember.me.user' order by s.created_at desc limit 1`);
+  assert.equal(s.persistent, false); assert.equal(s.ttl, 12 * 3600);
+  const r2 = await new Client('rm3').call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'remember.me.user', password: PASSWORD } });
+  assert.match(r2.headers['set-cookie'], /Max-Age=2592000/, '30 days when remembered');
+  await c.call(auth, { method: 'POST', query: { action: 'logout' } });
+  const rows = await sql((t) => t`select count(*) filter (where revoked_at is not null)::int as revoked from nsignage.user_sessions s
+                                  join nsignage.users u on u.id = s.user_id where u.username = 'remember.me.user'`);
+  assert.equal(rows[0].revoked, 1);
+  assert.equal((await c.call(auth, { query: { action: 'me' } })).status, 401);
+  const [u] = await sql((t) => t`select last_login_at is not null as seen from nsignage.users where username = 'remember.me.user'`);
+  assert.equal(u.seen, true);
+});
+
+test('suspended accounts cannot log in; registration can be closed (staff-created accounts)', async () => {
+  const c = new Client('susp'); await register(c, 'suspended.user');
+  await sql((t) => t`update nsignage.users set account_status = 'suspended' where username = 'suspended.user'`);
+  assert.equal((await c.call(auth, { query: { action: 'me' } })).status, 401, 'existing session stops working');
+  const l = await new Client('susp2').call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'suspended.user', password: PASSWORD } });
+  assert.equal(l.status, 401);
+  assert.equal(l.body.error, 'Incorrect username or password.');
+  process.env.NSIGNAGE_REGISTRATION = 'closed';
+  try {
+    assert.equal((await new Client('cfg').call(auth, { query: { action: 'config' } })).body.registration, 'closed');
+    const reg = await register(new Client('closed'), 'should.not.exist');
+    assert.equal(reg.status, 403); assert.equal(reg.body.reason, 'registration-closed');
+  } finally {
+    delete process.env.NSIGNAGE_REGISTRATION;
+  }
+  assert.equal((await new Client('cfg2').call(auth, { query: { action: 'config' } })).body.registration, 'open');
+});
+
 test('health reports configuration flags only', async () => {
   const h = await new Client('h').call(health);
   assert.equal(h.status, 200, JSON.stringify(h.body));

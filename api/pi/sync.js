@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       // ---- authenticate or register (system context) ----
       await setContext(t, 'system');
       const [existing] = await t`
-        select d.id, d.secret_hash, d.owner_id, d.last_seen_at,
+        select d.id, d.secret_hash, d.owner_id, d.last_seen_at, host(d.local_ip) as local_ip,
                exists (select 1 from nsignage.legacy_browser_devices l where l.device_id = d.id) as legacy_claimed
         from nsignage.devices d where d.id = ${deviceId} for update`;
       if (!existing) {
@@ -57,6 +57,7 @@ export default async function handler(req, res) {
           throw httpError(401, 'Device secret does not match. Remove this Pi on the website (Devices → delete), then it can re-register.', 'bad-device-secret');
         }
         console.warn('[N-SIGNAGE CLOUD] device secret replaced for an unclaimed Pi', deviceId);
+        await t`insert into nsignage.device_events (device_id, event_type) values (${deviceId}, 'secret-replaced')`;
         await t`update nsignage.devices set secret_hash = ${secretHash} where id = ${deviceId}`;
       }
 
@@ -72,6 +73,15 @@ export default async function handler(req, res) {
           media_hash = ${mediaHash},
           last_seen_at = now()
         where id = ${deviceId}`;
+      // Connection history (only on changes, not on every heartbeat)
+      if (existing && report.localIp && existing.local_ip && existing.local_ip !== report.localIp) {
+        await t`insert into nsignage.device_events (device_id, event_type, ip_address, details)
+                values (${deviceId}, 'ip-changed', ${report.localIp}::inet, ${t.json({ previous: existing.local_ip })})`;
+      }
+      if (!existing || Date.now() - ms(existing.last_seen_at) > 5 * 60_000) {
+        await t`insert into nsignage.device_events (device_id, event_type, ip_address, details)
+                values (${deviceId}, 'online', ${report.localIp}::inet, ${t.json({ agentVersion: report.agentVersion })})`;
+      }
       if (net) {
         // Find Pi index; refreshed at most every 30 s per network
         await t`

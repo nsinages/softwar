@@ -14,7 +14,7 @@
 // A transfer is "completed" only after the Pi reports that it saved the file.
 import { handleUpload } from '@vercel/blob/client';
 import {
-  send, handleError, httpError, readJsonBody, requireSameOrigin, isOnline, keyHash, DEVICE_ID_RX,
+  send, handleError, httpError, readJsonBody, requireSameOrigin, isOnline, keyHash, DEVICE_ID_RX, SAVED_ID_RX,
 } from './_lib/cloud.js';
 import { requireUser, withCustomer, requireOwnedDevice } from './_lib/auth.js';
 import { asSystem, rateLimit } from './_lib/db.js';
@@ -53,6 +53,9 @@ export default async function handler(req, res) {
       requireBlob();
       await rateLimit('transfer-create', keyHash(user.id), 120, 3600);
       const deviceId = String(body.deviceId || '');
+      if (SAVED_ID_RX.test(deviceId)) {
+        throw httpError(409, 'This display is saved in your account but not connected yet, so files cannot be sent to it. Verify it first with "Find on this Wi-Fi" or its pairing code.', 'device-not-verified');
+      }
       if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
       // Opportunistic cleanup of a few overdue transfers (the daily cron does the rest)
       try {

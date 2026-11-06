@@ -71,7 +71,16 @@ export default async function handler(req, res) {
     let urls = [];
 
     const result = await withCustomer(req, async (t, { user }) => {
-      const device = await requireOwnedDevice(t, user, deviceId);
+      const device = await requireOwnedDevice(t, user, deviceId, { allowSaved: true });
+      if (device.registration === 'saved') {
+        // Saved by the customer (name + IP) but no Pi has confirmed it: nothing to report or control yet
+        const notConnected = 'Saved in your account, but this display is not connected yet. Add it with "Find on this Wi-Fi" or its pairing code to verify it.';
+        if (req.method === 'GET' && action === 'status') {
+          return { ok: false, saved: true, online: false, lastSeen: null, error: notConnected, data: { status: 'unknown', ip: device.localIp, hostname: device.hostname } };
+        }
+        if (req.method === 'GET' && action === 'media') return { ok: true, saved: true, online: false, media: [], pending: [], message: notConnected };
+        throw httpError(409, notConnected, 'device-not-verified');
+      }
       if (req.method === 'GET' && action === 'status') return statusAction(device);
       if (req.method === 'GET' && action === 'media') return mediaAction(t, device);
       if (req.method === 'GET' && action === 'result') {

@@ -5,6 +5,7 @@
 // Needs DATABASE_URL (the nsignage_api pooler connection). Get it once with:
 //   npx vercel env pull .env.local        (file is git-ignored)
 // then:
+//   npm run admin -- create-customer <username> ["Display name"]   (when NSIGNAGE_REGISTRATION=closed)
 //   npm run admin -- account <username>
 //   npm run admin -- reset-recovery <username>   new recovery key + sign out everywhere
 //   npm run admin -- revoke-sessions <username>
@@ -32,10 +33,11 @@ loadEnvFile(path.resolve('.env.local'));
 
 const { asSystem, closeDb } = await import('../api/_lib/db.js');
 const { revokeSessions } = await import('../api/_lib/auth.js');
-const { newRecoveryKey, hashRecoveryKey, normalizeUsername } = await import('../api/_lib/password.js');
+const { newRecoveryKey, hashRecoveryKey, normalizeUsername, validateUsername, hashPassword } = await import('../api/_lib/password.js');
+const crypto = await import('node:crypto');
 
 const DEVICE_ID_RX = /^[a-f0-9]{16}$/;
-const [cmd, arg] = process.argv.slice(2);
+const [cmd, arg, extraArg] = process.argv.slice(2);
 const log = (...a) => console.log(...a);
 const audit = (action, detail) => console.error(`[audit] ${new Date().toISOString()} ${action} ${JSON.stringify(detail)}`);
 
@@ -51,6 +53,30 @@ const event = (t, name, userId, detail, deviceId = null) =>
 
 try {
   switch (cmd) {
+    case 'create-customer': {
+      const username = normalizeUsername(arg);
+      try { validateUsername(username); } catch (e) { throw new Fail(e.message); }
+      const key = newRecoveryKey();
+      // Random password nobody knows: the customer chooses their own on /forgot-password with the key
+      const unusable = await hashPassword(crypto.randomBytes(48).toString('base64url'));
+      const u = await asSystem(async (t) => {
+        const [row] = await t`insert into nsignage.users (username, display_name, password_hash, recovery_hash, recovery_created_at)
+                              values (${username}, ${extraArg ? String(extraArg).slice(0, 80) : null}, ${unusable}, ${hashRecoveryKey(key)}, now())
+                              on conflict (username) do nothing returning id, username`;
+        if (!row) throw new Fail(`The username "${username}" is already taken`);
+        await event(t, 'staff-create-customer', row.id, {});
+        return row;
+      });
+      audit('create-customer', { user: u.id, username: u.username });
+      log(`Account "${u.username}" created.
+
+Give the customer this one-time key (by phone or in person):
+
+  ${key}
+`);
+      log('They open the website → "Forgot password?" → enter the username and this key → choose their own password.');
+      break;
+    }
     case 'account': {
       const info = await asSystem(async (t) => {
         const u = await findUser(t);
@@ -94,7 +120,8 @@ try {
     case 'enable': {
       const u = await asSystem(async (t) => {
         const user = await findUser(t);
-        await t`update nsignage.users set disabled = ${cmd === 'disable'} where id = ${user.id}`;
+        await t`update nsignage.users set disabled = ${cmd === 'disable'}, account_status = ${cmd === 'disable' ? 'disabled' : 'active'}
+                where id = ${user.id}`;
         if (cmd === 'disable') await revokeSessions(t, user.id);
         await event(t, `staff-${cmd}`, user.id, {});
         return user;
@@ -126,7 +153,7 @@ try {
       break;
     }
     default:
-      log('Usage: npm run admin -- <account|reset-recovery|revoke-sessions|disable|enable|device|unlink-device> <username|deviceId>');
+      log('Usage: npm run admin -- <create-customer|account|reset-recovery|revoke-sessions|disable|enable|device|unlink-device> <username|deviceId>');
       process.exitCode = cmd ? 1 : 0;
   }
 } catch (err) {

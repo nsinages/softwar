@@ -1,8 +1,9 @@
 // /api/auth?action=<action> — customer accounts (username + password, no email).
 //
+//   GET  action=config               → { ok, registration: 'open' | 'closed' }
 //   GET  action=me                   → { ok, user } | 401
 //   POST action=register             { username, password, displayName? } → { ok, user, recoveryKey }
-//   POST action=login                { username, password }
+//   POST action=login                { username, password, remember? }   remember=false → 12 h browser-session cookie
 //   POST action=logout
 //   POST action=logout-others        sign out every other session of this account
 //   POST action=change-password      { currentPassword, newPassword }   (signs out other sessions)
@@ -23,6 +24,9 @@ import {
   newRecoveryKey, hashRecoveryKey, PASSWORD_MAX,
 } from './_lib/password.js';
 import { asSystem, rateLimit } from './_lib/db.js';
+
+/** Self-registration: 'open' (default) or 'closed' (accounts created by staff: npm run admin -- create-customer). */
+export const registrationMode = () => (String(process.env.NSIGNAGE_REGISTRATION || 'open').toLowerCase() === 'closed' ? 'closed' : 'open');
 
 const FAIL_LIMIT = 10;           // failed logins per username …
 const FAIL_WINDOW_S = 15 * 60;   // … within 15 minutes, then that username is locked for the window
@@ -58,6 +62,9 @@ function newRecovery() {
 }
 
 async function register(req, res) {
+  if (registrationMode() === 'closed') {
+    throw httpError(403, 'New accounts are created by N-Signage support. Please contact us to get your login.', 'registration-closed');
+  }
   await rateLimit('register', keyHash(clientIp(req)), 5, 3600);
   const body = readJsonBody(req);
   const username = normalizeUsername(body.username);
@@ -95,6 +102,7 @@ async function login(req, res) {
   const user = await asSystem((t) => getUserByUsername(t, username));
   const ok = await verifyPassword(password, user?.passwordHash); // same work for unknown users
   if (!user || !ok || user.disabled) {
+    // same message for unknown user, wrong password and disabled account (no account enumeration)
     await recordFailure(username, req, Boolean(user));
     console.warn('[N-SIGNAGE AUTH] login failed', JSON.stringify({ known: Boolean(user) }));
     throw httpError(401, 'Incorrect username or password.', 'bad-credentials');
@@ -103,9 +111,9 @@ async function login(req, res) {
   await asSystem(async (t) => {
     await t`delete from nsignage.rate_limits where bucket = 'login-fail' and key_hash = ${keyHash(username)}`;
     if (newHash) await t`update nsignage.users set password_hash = ${newHash} where id = ${user.id}`;
-    await createSession(t, req, res, user.id);
+    await createSession(t, req, res, user.id, { remember: body.remember !== false });
   });
-  console.log('[N-SIGNAGE AUTH] login', JSON.stringify({ user: user.id }));
+  console.log('[N-SIGNAGE AUTH] login', JSON.stringify({ user: user.id, remember: body.remember !== false }));
   send(res, 200, { ok: true, user: userView(user) });
 }
 
@@ -190,6 +198,9 @@ async function regenerateRecovery(req, res) {
 export default async function handler(req, res) {
   try {
     const action = String(req.query?.action || '');
+    if (req.method === 'GET' && action === 'config') {
+      return send(res, 200, { ok: true, registration: registrationMode() });
+    }
     if (req.method === 'GET' && action === 'me') {
       const cur = await currentUser(req);
       if (!cur) return send(res, 401, { ok: false, reason: 'not-logged-in' });
