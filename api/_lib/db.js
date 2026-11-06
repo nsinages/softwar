@@ -102,18 +102,30 @@ export async function withContext(ctx, ids, fn) {
   const device = ids?.device || '';
   if (user && !UUID_RX.test(user)) throw dbError(400, 'Invalid user id', 'invalid');
   if (device && !DEVICE_ID_RX.test(device)) throw dbError(400, 'Invalid device id', 'invalid');
-  try {
-    return await sql().begin(async (t) => {
-      await t`select set_config('role', ${API_ROLE}, true),
-                     set_config('nsignage.ctx', ${ctx}, true),
-                     set_config('nsignage.user_id', ${user}, true),
-                     set_config('nsignage.device_id', ${device}, true)`;
-      return fn(t);
-    });
-  } catch (err) {
-    throw mapDbError(err);
+  for (let attempt = 1; ; attempt += 1) {
+    let started = false;
+    try {
+      return await sql().begin(async (t) => {
+        started = true;
+        await t`select set_config('role', ${API_ROLE}, true),
+                       set_config('nsignage.ctx', ${ctx}, true),
+                       set_config('nsignage.user_id', ${user}, true),
+                       set_config('nsignage.device_id', ${device}, true)`;
+        return fn(t);
+      });
+    } catch (err) {
+      // A brief DNS / connect failure while OPENING a new pooled connection: nothing was
+      // sent, so one retry is safe (never retried once the transaction body has started).
+      if (!started && attempt === 1 && CONNECT_ERRORS.has(err?.code)) {
+        console.warn('[N-SIGNAGE DB] connect failed, retrying once', err.code);
+        await new Promise((r) => setTimeout(r, 300));
+        continue;
+      }
+      throw mapDbError(err);
+    }
   }
 }
+const CONNECT_ERRORS = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'CONNECT_TIMEOUT']);
 
 /** Switch the RLS context inside an open transaction (e.g. a claim inside a customer request). */
 export async function setContext(t, ctx, ids = {}) {

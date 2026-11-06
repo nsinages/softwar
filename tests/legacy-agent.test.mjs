@@ -10,9 +10,14 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { setupEnv, memoryBlob, Client } from './helpers/harness.js';
+import { setupEnv, memoryBlob, Client, footprint, deleteFootprint } from './helpers/harness.js';
 
 const IP = '198.51.100.77';
+footprint.ips.add(IP); // the agent's own requests (not sent through Client) use this IP
+// A remote database (real Supabase) is far slower than in-process PGlite: give the agent and the polls more time.
+const REMOTE = Boolean(process.env.TEST_DATABASE_URL);
+const AGENT_SECONDS = REMOTE ? 150 : 25;
+const WAIT_MS = REMOTE ? 120000 : 20000;
 let database; let server; let db; let baseUrl; let blob; let work;
 let auth; let devices; let find; let sync; let transfer; let blobStore;
 
@@ -58,6 +63,7 @@ after(async () => {
         await t`delete from nsignage.devices where id = ${agentDeviceId || ''}`;
         await t`delete from nsignage.users where id = ${u.id}`;
       }
+      await deleteFootprint(t, { userIds: u ? [u.id] : [], deviceIds: agentDeviceId ? [agentDeviceId] : [] });
     });
   }
   await db?.closeDb();
@@ -66,7 +72,7 @@ after(async () => {
 });
 let agentDeviceId = null;
 
-const waitFor = async (fn, ms = 20000) => {
+const waitFor = async (fn, ms = WAIT_MS) => {
   const until = Date.now() + ms;
   for (;;) {
     const v = await fn();
@@ -76,11 +82,11 @@ const waitFor = async (fn, ms = 20000) => {
   }
 };
 
-test('unmodified agent 1.0: find, claim, relay transfer, completion, copy deleted', { skip: !python && 'Python not installed' }, async () => {
+test('unmodified agent 1.0: find, claim, relay transfer, completion, copy deleted', { timeout: (AGENT_SECONDS + 60) * 1000, skip: !python && 'Python not installed' }, async () => {
   const mapFile = path.join(work, 'blobmap.json');
   fs.writeFileSync(mapFile, '{}');
   const proc = spawn(python, [path.resolve('tests/helpers/run_legacy_agent.py')], {
-    env: { ...process.env, CLOUD_URL: baseUrl, WORKDIR: work, BLOB_MAP: mapFile, DURATION: '25', PYTHONUNBUFFERED: '1' },
+    env: { ...process.env, CLOUD_URL: baseUrl, WORKDIR: work, BLOB_MAP: mapFile, DURATION: String(AGENT_SECONDS), PYTHONUNBUFFERED: '1' },
   });
   const events = [];
   let out = '';

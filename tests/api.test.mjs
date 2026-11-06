@@ -5,7 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { setupEnv, memoryBlob, Client, ORIGIN } from './helpers/harness.js';
+import { setupEnv, memoryBlob, Client, ORIGIN, deleteFootprint } from './helpers/harness.js';
 
 let database; let blob; let db;
 let auth; let devices; let device; let find; let sync; let pairing; let transfer; let cron; let health;
@@ -28,6 +28,7 @@ async function cleanup() {
     await t`delete from nsignage.users where id = any(${ids}::uuid[])`;
     await t`delete from nsignage.legacy_browser_sessions where browser_id = any(${[...created.legacyBrowsers]}::uuid[])`;
     await t`delete from nsignage.rate_limits where key_hash = any(${[...created.usernames].map(keyHash)}::text[])`;
+    await deleteFootprint(t, { userIds: ids, deviceIds: devs });
   });
 }
 
@@ -192,7 +193,9 @@ test('login, logout, wrong password, brute-force lockout', async () => {
 
   const attacker = new Client('attacker', '192.0.2.88');
   for (let i = 0; i < 10; i += 1) {
-    await attacker.call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'locktest', password: `guess-number-${i}` } });
+    const guess = await attacker.call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'locktest', password: `guess-number-${i}` } });
+    // every guess must be a counted failure; a 503 here is a database/network problem, not a lockout bug
+    assert.equal(guess.status, 401, `guess ${i + 1}: ${JSON.stringify(guess.body)}`);
   }
   const locked = await attacker.call(auth, { method: 'POST', query: { action: 'login' }, body: { username: 'locktest', password: PASSWORD } });
   assert.equal(locked.status, 429, 'correct password refused while locked');

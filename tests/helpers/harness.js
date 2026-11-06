@@ -50,6 +50,27 @@ function makeRes() {
   };
 }
 
+/**
+ * Everything a simulated client sent that the API turns into rate-limit keys or
+ * security-event IP hashes (client IPs, usernames given to auth actions). Used to
+ * remove exactly this run's rows from a real Supabase test project afterwards.
+ */
+export const footprint = { ips: new Set(), usernames: new Set() };
+
+/**
+ * Delete this run's rate-limit rows and security events (they have no foreign key to
+ * users/devices, so deleting those does not remove them). Targeted: only keys derived
+ * from values this run used. Call inside db.asSystem().
+ */
+export async function deleteFootprint(t, { userIds = [], deviceIds = [] } = {}) {
+  const { keyHash } = await import('../../api/_lib/cloud.js');
+  const ipHashes = [...footprint.ips].map(keyHash);
+  const keys = [...ipHashes, ...[...footprint.usernames, ...userIds, ...deviceIds].map(keyHash)];
+  await t`delete from nsignage.security_events
+          where user_id = any(${userIds}::uuid[]) or device_id = any(${deviceIds}::text[]) or ip_hash = any(${ipHashes}::text[])`;
+  await t`delete from nsignage.rate_limits where key_hash = any(${keys}::text[])`;
+}
+
 /** A simulated browser (or Pi) with its own cookies and public IP. */
 export class Client {
   constructor(name, ip = `10.${(Math.random() * 250) | 0}.${(Math.random() * 250) | 0}.${((Math.random() * 250) | 0) + 1}`) {
@@ -59,6 +80,8 @@ export class Client {
   }
 
   async call(handler, { method = 'GET', query = {}, body, headers = {}, origin = ORIGIN } = {}) {
+    footprint.ips.add(String(this.ip).trim().toLowerCase());
+    if (query?.action && body && typeof body.username === 'string') footprint.usernames.add(body.username.trim().toLowerCase());
     const cookie = Object.entries(this.cookies).map(([k, v]) => `${k}=${v}`).join('; ');
     const req = {
       method,
