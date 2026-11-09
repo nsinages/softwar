@@ -4,7 +4,7 @@
 // Older versions of the website saved displays per browser (no login). This
 // panel appears only in a browser that still has that old session. Nothing
 // is moved automatically: each display is linked only after a second proof
-// of control — being on the display's Wi-Fi now, or its pairing code.
+// of control: being on the display's Wi-Fi now (same check as Find IP).
 // =============================================
 import React, { useCallback, useEffect, useState } from 'react';
 import { History, Link2, Loader2, CheckCircle2, AlertTriangle, RotateCw } from 'lucide-react';
@@ -20,7 +20,6 @@ const STATUS_TEXT = {
 export default function LegacyDevicesPanel({ onLinked }) {
   const [state, setState] = useState({ loading: true, devices: [] });
   const [busyId, setBusyId] = useState(null);
-  const [codes, setCodes] = useState({});
   const [msg, setMsg] = useState(null);
 
   const load = useCallback(async () => {
@@ -33,7 +32,7 @@ export default function LegacyDevicesPanel({ onLinked }) {
   async function link(d) {
     setBusyId(d.deviceId);
     setMsg(null);
-    const r = await cloudLinkLegacy(d.deviceId, codes[d.deviceId] || '');
+    const r = await cloudLinkLegacy(d.deviceId);
     setBusyId(null);
     if (r.ok) {
       setMsg({ ok: true, text: `${d.name || d.hostname || d.deviceId} is now in your account.` });
@@ -60,7 +59,7 @@ export default function LegacyDevicesPanel({ onLinked }) {
       <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 'var(--space-3)' }}>
         These displays were added in this browser before customer accounts existed. To move one into your account,
         confirm it is yours: connect this phone or computer to <strong>the same Wi-Fi as the display</strong> and press
-        Link, or enter the pairing code shown on the display (after its software update).
+        Link.
       </p>
       {msg && (
         <div className={`alert ${msg.ok ? 'alert-success' : 'alert-danger'}`} style={{ fontSize: 'var(--text-xs)', marginBottom: 'var(--space-3)' }}>
@@ -84,11 +83,7 @@ export default function LegacyDevicesPanel({ onLinked }) {
             </div>
             {d.status === 'linkable' ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch' }}>
-                {!d.sameNetwork && d.pairingSupported && (
-                  <input className="form-input" placeholder="Pairing code" maxLength={9} style={{ fontFamily: 'var(--font-mono)', maxWidth: 160 }}
-                    value={codes[d.deviceId] || ''} onChange={(e) => setCodes((c) => ({ ...c, [d.deviceId]: e.target.value }))} />
-                )}
-                <button type="button" className="btn btn-primary btn-sm" onClick={() => link(d)} disabled={Boolean(busyId)}>
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => link(d)} disabled={Boolean(busyId) || !d.sameNetwork}>
                   {busyId === d.deviceId ? <Loader2 size={13} style={{ animation: 'spin 0.8s linear infinite' }} /> : <Link2 size={13} />} Link to my account
                 </button>
               </div>

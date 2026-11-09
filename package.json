@@ -17,10 +17,10 @@
     "db:setup": "node scripts/supabase-setup.mjs",
     "db:migrate-redis": "node scripts/migrate-redis-to-supabase.mjs",
     "dev:cloud": "node scripts/cloud-dev-server.mjs",
-    "db:verify": "node scripts/db-verify.mjs"
+    "db:verify": "node scripts/db-verify.mjs",
+    "upload:keygen": "node scripts/upload-keygen.mjs"
   },
   "dependencies": {
-    "@vercel/blob": "^2.8.2",
     "axios": "^1.21.0",
     "lucide-react": "^1.52.0",
     "postgres": "3.4.9",

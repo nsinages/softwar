@@ -14,9 +14,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { findPi, isDiscoveryDebug } from '../api/discoveryApi';
-
-// Linux username (same rule as the LAN helper)
-const IDENTIFIER_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
+import { isValidPiName, piNameMatch, PI_NAME_HINT } from '../../shared/piName';
 
 const resultCardStyle = (border) => ({
   background: 'var(--bg-card)',
@@ -58,11 +56,11 @@ const FAILURE_TEXT = {
   'cloud-not-configured': 'The N-Signage cloud service is not available right now (server storage is not configured). This is a website problem, not a problem with your Pi — contact your administrator.',
   'cloud-unreachable': 'Could not reach the N-Signage cloud service. Check this computer\'s internet connection and try again.',
   'cloud-error': 'The N-Signage cloud service returned an error.',
-  'not-found': 'No Raspberry Pi with this username has connected to the cloud from this network in the last 15 minutes.',
+  'not-found': 'No Raspberry Pi with this name answered on this network.',
 };
 
 /**
- * @param {string}   identifier - Pi Linux username typed in the form
+ * @param {string}   identifier - Pi Name typed in the form (Linux username or hostname)
  * @param {function} onUseIp    - called with the verified IP to fill the IP field
  * @param {function} [onFound]  - called with the verified device (or null on a new search)
  */
@@ -87,7 +85,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
   }
 
   async function handleFind() {
-    if (!IDENTIFIER_RX.test(trimmed)) {
+    if (!isValidPiName(trimmed)) {
       setState('invalid');
       setResult(null);
       return;
@@ -170,7 +168,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
           ) : (
             <>
               <Search size={13} />
-              Find Pi
+              Find IP
             </>
           )}
         </button>
@@ -180,7 +178,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
       {state === 'invalid' && (
         <div className="alert alert-warning" style={{ fontSize: 'var(--text-xs)' }}>
           <AlertTriangle size={14} className="alert-icon" />
-          <span>Enter the Raspberry Pi's Linux username using letters, numbers, <code>_</code>, <code>.</code> or <code>-</code> (e.g. <code>ns</code>).</span>
+          <span>{PI_NAME_HINT}</span>
         </div>
       )}
 
@@ -193,6 +191,11 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
           </div>
 
           <div style={detailGridStyle}>
+            <span style={{ color: 'var(--text-muted)' }}>Pi Name:</span>
+            <span style={{ fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)' }}>
+              {piNameMatch(trimmed, selected) === 'hostname' ? selected.hostname : selected.username}
+            </span>
+
             <span style={{ color: 'var(--text-muted)' }}>Username:</span>
             <span style={{ fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)' }}>{selected.username}</span>
 
@@ -212,7 +215,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
           </div>
 
           <span className="form-hint">
-            The IP address has been filled in below. You can still edit it if needed.
+            The IP address was detected automatically. Click Add Device to finish.
           </span>
         </div>
       )}
@@ -222,7 +225,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
         <div style={resultCardStyle('rgba(16, 185, 129, 0.3)')}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--success)', fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-sm)' }}>
             <CheckCircle2 size={18} />
-            <span>{result.devices.length} Raspberry Pis found with username "{trimmed}"</span>
+            <span>{result.devices.length} Raspberry Pis named "{trimmed}" found</span>
           </div>
           <span className="form-hint">Choose your Raspberry Pi by its hostname.</span>
 
@@ -256,7 +259,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
 
           {result?.reason === 'other-network' && (
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
-              A Raspberry Pi with the username <strong>{trimmed}</strong> is connected to the cloud, but from a
+              A Raspberry Pi named <strong>{trimmed}</strong> is connected to the cloud, but from a
               different network. Connect this computer or phone to the same Wi-Fi as the Pi, then try again.
             </div>
           )}
@@ -264,7 +267,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
           {result?.reason === 'username-mismatch' && (
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
               {result.otherCount} N-Signage Raspberry Pi{result.otherCount === 1 ? '' : 's'} answered on this network,
-              but none use the username <strong>{trimmed}</strong>. Check the username and try again.
+              but none is named <strong>{trimmed}</strong> (username or hostname). Check the Pi Name and try again.
             </div>
           )}
 
@@ -281,7 +284,7 @@ export default function PiDiscoveryPanel({ identifier, onUseIp, onFound }) {
               <li>Both devices are connected to the same Wi-Fi network.</li>
               <li>The Raspberry Pi is powered on.</li>
               <li>The N-Signage cloud and discovery services are running on the Pi, and it has internet access.</li>
-              <li>The username is the Pi's Linux username (e.g. <code>ns</code>).</li>
+              <li>The Pi Name is the Raspberry Pi's username or hostname (e.g. <code>ns001</code>).</li>
             </ul>
           </div>
           )}

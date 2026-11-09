@@ -6,9 +6,9 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { Redis } from '@upstash/redis';
 import { startMockUpstash } from './helpers/mockUpstash.js';
-import { setupEnv, memoryBlob, Client } from './helpers/harness.js';
+import { setupEnv, Client } from './helpers/harness.js';
 
-let upstash; let database; let db; let mig; let blobStore;
+let upstash; let database; let db; let mig;
 let auth; let devices; let sync;
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
@@ -20,8 +20,6 @@ before(async () => {
   database = await setupEnv();
   db = await import('../api/_lib/db.js');
   mig = await import('../scripts/lib/redisMigration.mjs');
-  blobStore = await import('../api/_lib/blobStore.js');
-  blobStore.setBlobBackend(memoryBlob().backend);
   ({ default: auth } = await import('../api/auth.js'));
   ({ default: devices } = await import('../api/devices.js'));
   ({ default: sync } = await import('../api/pi/sync.js'));

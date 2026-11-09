@@ -1,35 +1,41 @@
 // =============================================
-// N Signage — Relay transfers to cloud devices (hosted website)
+// N Signage — direct, end-to-end encrypted transfers to cloud devices
 //
-// This is a RELAY transfer, not peer-to-peer:
-//   this browser ──► N-Signage cloud relay (temporary copy) ──► the Pi
-// The temporary copy is deleted when the Pi confirms it saved the file, or
-// when the transfer is cancelled or expires (48 h by default).
+//   this browser ──encrypted chunks──► the Pi's upload receiver (Cloudflare Tunnel)
+//   this browser ──metadata + tickets──► N-Signage website (never any media bytes)
 //
-// Success is reported ONLY when the Pi confirms the file is saved. If the
-// display is offline, the transfer waits in the queue and the UI says so.
+// Every chunk is encrypted in this browser with a key derived from the Pi's
+// receiver key (shared/e2eCrypto.js). The website and Cloudflare cannot read
+// the file. Nothing is stored in the cloud: if the display is offline the
+// transfer is refused, not queued.
+//
+// Success is reported ONLY when the Pi confirms it saved the file after
+// checking its size and SHA-256.
 // =============================================
 import axios from 'axios';
-import { upload } from '@vercel/blob/client';
 import { cloudError } from './cloudApi';
 import { sha256File, readHead } from '../utils/sha256';
-import { checkMediaFile, contentMatches, extOf, mediaTypeOf } from '../../shared/mediaTypes';
-
-const MULTIPART_OVER = 20 * 1024 * 1024; // Vercel Blob multipart (parallel, retried parts)
-const POLL_MS = 2500;
+import { checkMediaFile, contentMatches, extOf } from '../../shared/mediaTypes';
+import { createUploadSession, deriveChunkKey, receiverFingerprint } from '../../shared/e2eCrypto';
+import { uploadChunks, TransferError, RECEIVER_REASON_TEXT } from '../../shared/directUpload';
 
 export const FINAL_STATES = ['completed', 'cancelled', 'expired'];
 
 const REASON_TEXT = {
+  ...RECEIVER_REASON_TEXT,
   'too-large': null, // server message is specific
   'unsupported-type': 'This file type is not supported.',
   'insufficient-storage': null,
   'checksum-mismatch': 'The file arrived damaged on the display. Retry the transfer.',
-  'size-mismatch': 'The upload was incomplete. Retry the transfer.',
-  'content-mismatch': null,
-  'agent-update-required': null,
-  'blob-not-configured': 'File transfer is not available right now (server storage not configured). Please contact support.',
+  'decrypt-failed': 'A part of the file was damaged on the way to the display. Retry the transfer.',
+  'display-offline': 'The display is offline, so the file cannot be sent now. Nothing was uploaded. Try again when the display is online.',
+  'no-receiver': 'This display cannot receive files from the website yet: its secure upload service is not installed.',
+  'key-change-pending': 'This display reported a new security key. Confirm it on the Devices page before sending files.',
+  'upload-not-configured': 'Sending files is not available right now. Please contact support.',
+  'not-allowed': 'The transfer is no longer allowed (it was cancelled, expired, or the display was removed).',
+  'wrong-device': 'Security check failed: the ticket was for another display.',
   'not-owner': 'This display is no longer registered to your account.',
+  'device-not-verified': null,
 };
 
 function errorText(error, context) {
@@ -55,6 +61,11 @@ export async function getTransfer(id) {
   return res.data.transfer;
 }
 
+export async function getUploadTarget(deviceId) {
+  const res = await axios.get(`/api/transfer?action=target&deviceId=${encodeURIComponent(deviceId)}`, { timeout: 15000 });
+  return res.data.receiver;
+}
+
 export async function cancelTransfer(id) {
   try {
     const res = await post('cancel', { transferId: id });
@@ -64,8 +75,17 @@ export async function cancelTransfer(id) {
   }
 }
 
+export async function confirmDisplayKey(deviceId, fingerprint) {
+  try {
+    await post('confirm-key', { deviceId, fingerprint });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: errorText(error, 'Confirming the display key') };
+  }
+}
+
 /**
- * Check a file before anything is uploaded: type, browser MIME, real content
+ * Check a file before anything is sent: type, browser MIME, real content
  * (magic bytes) and size limit. Returns an error message or ''.
  */
 export async function precheckFile(file, maxBytes) {
@@ -99,157 +119,131 @@ export async function fileChecksum(file, opts) {
   }
 }
 
-async function uploadToRelay(file, transferId, pathname, { onProgress, signal }) {
-  // The SDK throttles progress events; a trailing one can fire after the
-  // upload finished. Ignore anything that arrives after this call returned.
-  let finished = false;
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const t = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Cancelled', 'AbortError')); }, { once: true });
+});
+
+/** Receiver details from the website; refuses when the display cannot take the file now. */
+async function readyTarget(deviceId) {
+  let target;
   try {
-    const blob = await upload(pathname, file, {
-      access: 'public',
-      handleUploadUrl: '/api/transfer?action=blob-token',
-      clientPayload: JSON.stringify({ transferId }),
-      multipart: file.size > MULTIPART_OVER,
-      contentType: mediaTypeOf(file.name)?.mime,
-      abortSignal: signal,
-      onUploadProgress: ({ loaded, total }) => { if (!finished) onProgress?.(loaded, total || file.size); },
-    });
-    return blob.url;
-  } finally {
-    finished = true;
+    target = await getUploadTarget(deviceId);
+  } catch (error) {
+    throw new TransferError(errorText(error, 'Checking the display'), { reason: error.response?.data?.reason });
   }
+  if (!target?.available) throw new TransferError(REASON_TEXT['no-receiver'], { reason: 'no-receiver' });
+  if (target.keyChangePending) throw new TransferError(REASON_TEXT['key-change-pending'], { reason: 'key-change-pending' });
+  if (!target.online || !target.url) throw new TransferError(REASON_TEXT['display-offline'], { reason: 'display-offline' });
+  if ((await receiverFingerprint(target.publicKey)) !== target.fingerprint) {
+    throw new TransferError('Security check failed: the display key does not match its fingerprint.', { reason: 'bad-key' });
+  }
+  return target;
 }
 
-/**
- * Wait until the Pi confirms (or the transfer fails / is cancelled / expires),
- * or until `waitMs` passes — then the transfer simply stays queued.
- */
-export async function waitForTransfer(id, { onUpdate, signal, waitMs = 10 * 60 * 1000 } = {}) {
-  const until = Date.now() + waitMs;
+/** After the Pi saved the file it reports to the website; wait briefly for that record. */
+async function confirmedTransfer(id, signal) {
+  const until = Date.now() + 20000;
   let last = null;
-  while (!signal?.aborted) {
+  while (Date.now() < until && !signal?.aborted) {
     try {
       last = await getTransfer(id);
-      onUpdate?.(last);
-      if (FINAL_STATES.includes(last.state) || last.state === 'failed') return last;
-    } catch (error) {
-      if (error.response?.status === 401 || error.response?.status === 404) throw new Error(errorText(error, 'Status'));
-      // transient network problem: keep waiting
-    }
-    if (Date.now() > until) return last;
-    await new Promise((r) => setTimeout(r, POLL_MS));
+      if (last.state !== 'created') return last;
+    } catch { /* keep trying */ }
+    await sleep(1000, signal).catch(() => {});
   }
   return last;
 }
 
+async function runUpload({ file, deviceId, start, emit, signal, fetchImpl }) {
+  const target = await readyTarget(deviceId);
+  const session = await createUploadSession({ receiverPublicKey: target.publicKey, deviceId });
+  let info;
+  try {
+    info = await start(session.epk);
+  } catch (error) {
+    throw new TransferError(errorText(error, 'Starting the transfer'), { reason: error.response?.data?.reason });
+  }
+  const { transfer } = info;
+  emit({ transferId: transfer.id, transfer });
+  const keyed = await deriveChunkKey(session, transfer.id);
+  emit({ phase: 'uploading', loaded: 0, total: transfer.size });
+  const renew = async () => (await post('ticket', { transferId: transfer.id, epk: session.epk })).data.ticket;
+  const result = await uploadChunks({
+    file, transfer, ticket: info.ticket, uploadUrl: info.uploadUrl, chunkBytes: info.chunkBytes, keyed, signal, renew, fetchImpl,
+    onProgress: (loaded) => emit({ phase: 'uploading', loaded, total: transfer.size }),
+  });
+  emit({ phase: 'confirming' });
+  const recorded = await confirmedTransfer(transfer.id, signal);
+  return { transfer: recorded || transfer, savedAs: result.savedAs };
+}
+
 /**
- * Send one file to one cloud device.
- * onUpdate({ phase, loaded, total, transfer, error })
- *   phase: hashing | uploading | confirming | waiting | completed | failed | cancelled | expired
- * @returns {Promise<{ ok: boolean, transfer?: object, error?: string, phase: string }>}
+ * Send one file to one cloud device, directly and encrypted.
+ * onUpdate({ phase, loaded, total, transfer, error })   phase: hashing | uploading | confirming | completed | failed | cancelled
  */
-export async function sendFileViaRelay(device, file, { onUpdate, signal, waitMs } = {}) {
+export async function sendFileDirect(device, file, { onUpdate, signal, fetchImpl } = {}) {
   let transferId = null;
-  const emit = (u) => onUpdate?.({ transferId, ...u });
+  const emit = (u) => { if (u.transferId) transferId = u.transferId; onUpdate?.({ transferId, ...u }); };
   try {
     emit({ phase: 'hashing', loaded: 0, total: file.size });
     const sha256 = await fileChecksum(file, { signal, onProgress: (f) => emit({ phase: 'hashing', loaded: f * file.size, total: file.size }) });
-
-    let created;
-    try {
-      created = await post('create', { deviceId: device.piDeviceId, filename: file.name, size: file.size, sha256 });
-    } catch (error) {
-      return fail(errorText(error, 'Starting the transfer'));
-    }
-    transferId = created.data.transfer.id;
-    return await uploadAndWait(file, created.data.transfer, created.data.uploadPathname, { emit, signal, waitMs });
-  } catch (error) {
-    if (signal?.aborted || error?.name === 'AbortError') return cancelled(transferId, emit);
-    return fail(error?.message || 'Transfer failed');
-  }
-
-  function fail(msg) {
-    emit({ phase: 'failed', error: msg });
-    return { ok: false, phase: 'failed', error: msg, transferId };
-  }
-}
-
-async function cancelled(transferId, emit) {
-  if (transferId) await cancelTransfer(transferId);
-  emit({ phase: 'cancelled' });
-  return { ok: false, phase: 'cancelled', error: 'Cancelled', transferId };
-}
-
-async function uploadAndWait(file, transfer, pathname, { emit, signal, waitMs }) {
-  const transferId = transfer.id;
-  emit({ phase: 'uploading', loaded: 0, total: file.size, transfer });
-  let url;
-  try {
-    url = await uploadToRelay(file, transferId, pathname, {
-      signal,
-      onProgress: (loaded, total) => emit({ phase: 'uploading', loaded, total }),
+    const { transfer, savedAs } = await runUpload({
+      file, deviceId: device.piDeviceId, emit, signal, fetchImpl,
+      start: async (epk) => (await post('create', { deviceId: device.piDeviceId, filename: file.name, size: file.size, sha256, epk })).data,
     });
+    return finish(transfer, savedAs, emit, transferId);
   } catch (error) {
-    if (signal?.aborted) return cancelled(transferId, emit);
-    const msg = `Upload to the relay failed: ${error.message || 'network error'}. You can retry.`;
-    emit({ phase: 'failed', error: msg, retryable: true });
-    return { ok: false, phase: 'failed', error: msg, transferId, needsUpload: true };
+    return failure(error, emit, transferId, signal);
   }
-
-  emit({ phase: 'confirming' });
-  let committed;
-  try {
-    committed = await post('commit', { transferId, url }, 60000);
-  } catch (error) {
-    const msg = errorText(error, 'Confirming the upload');
-    emit({ phase: 'failed', error: msg, retryable: true });
-    return { ok: false, phase: 'failed', error: msg, transferId };
-  }
-  emit({ phase: 'waiting', transfer: committed.data.transfer, deviceOnline: committed.data.deviceOnline });
-
-  const final = await waitForTransfer(transferId, {
-    signal,
-    waitMs,
-    onUpdate: (t) => emit({ phase: t.state === 'queued' ? 'waiting' : t.state, transfer: t, error: t.error, loaded: t.receivedBytes, total: t.size }),
-  });
-  if (signal?.aborted) return cancelled(transferId, emit);
-  if (final?.state === 'completed') return { ok: true, phase: 'completed', transfer: final, transferId };
-  if (final?.state === 'queued') return { ok: false, phase: 'waiting', transfer: final, transferId };
-  return { ok: false, phase: final?.state || 'failed', transfer: final, error: final?.error, transferId };
 }
 
 /**
- * Retry a failed transfer. If the relay copy still exists the Pi downloads it
- * again; otherwise `file` (re-selected by the customer if the page was
- * reloaded) is uploaded again — it must have the same checksum.
+ * Retry or resume an unfinished transfer (also after a page reload): the
+ * customer re-selects the same file (checked by SHA-256); a new one-time key
+ * and ticket are used and the Pi continues from the next chunk it needs.
  */
-export async function retryTransferWithFile(transferId, file, { onUpdate, signal, waitMs } = {}) {
+export async function retryTransferWithFile(transferId, file, { onUpdate, signal, fetchImpl } = {}) {
   const emit = (u) => onUpdate?.({ transferId, ...u });
-  let res;
   try {
-    res = await post('retry', { transferId });
-  } catch (error) {
-    const msg = errorText(error, 'Retry');
-    emit({ phase: 'failed', error: msg });
-    return { ok: false, phase: 'failed', error: msg, transferId };
-  }
-  const t = res.data.transfer;
-  if (!res.data.needsUpload) {
-    emit({ phase: 'waiting', transfer: t });
-    const final = await waitForTransfer(transferId, {
-      signal, waitMs, onUpdate: (x) => emit({ phase: x.state === 'queued' ? 'waiting' : x.state, transfer: x, error: x.error }),
+    const current = await getTransfer(transferId);
+    if (current.method !== 'direct') throw new TransferError('This older transfer cannot be resumed. Send the file again.', { reason: 'bad-method' });
+    if (!file) {
+      emit({ phase: 'failed', error: 'Select the same file again to resume this transfer.', needsFile: true });
+      return { ok: false, phase: 'failed', needsFile: true, transferId };
+    }
+    emit({ phase: 'hashing', loaded: 0, total: file.size });
+    const sha = await fileChecksum(file, { signal });
+    if (sha !== current.sha256 || file.size !== current.size) {
+      throw new TransferError('This is not the same file as the original transfer. Start a new upload instead.', { reason: 'different-file' });
+    }
+    const { transfer, savedAs } = await runUpload({
+      file, deviceId: current.deviceId, emit, signal, fetchImpl,
+      start: async (epk) => (await post('ticket', { transferId, epk })).data,
     });
-    return { ok: final?.state === 'completed', phase: final?.state === 'queued' ? 'waiting' : final?.state, transfer: final, error: final?.error, transferId };
+    return finish(transfer, savedAs, emit, transferId);
+  } catch (error) {
+    return failure(error, emit, transferId, signal);
   }
-  if (!file) {
-    emit({ phase: 'failed', error: 'Select the same file again to resume this transfer.', needsFile: true });
-    return { ok: false, phase: 'failed', needsFile: true, transferId };
+}
+
+function finish(transfer, savedAs, emit, transferId) {
+  if (transfer?.state === 'completed') {
+    emit({ phase: 'completed', transfer });
+    return { ok: true, phase: 'completed', transfer, transferId };
   }
-  emit({ phase: 'hashing', loaded: 0, total: file.size });
-  const sha = await fileChecksum(file, { signal });
-  if (sha !== t.sha256 || file.size !== t.size) {
-    const msg = 'This is not the same file as the original transfer. Start a new upload instead.';
-    emit({ phase: 'failed', error: msg });
-    return { ok: false, phase: 'failed', error: msg, transferId };
+  const msg = transfer?.error || `The display saved the file${savedAs ? ` as "${savedAs}"` : ''}, but the website has not recorded it yet. Check Recent transfers in a moment.`;
+  emit({ phase: transfer?.state === 'failed' ? 'failed' : 'confirming', transfer, error: msg });
+  return { ok: false, phase: transfer?.state || 'failed', transfer, error: msg, transferId };
+}
+
+async function failure(error, emit, transferId, signal) {
+  if (signal?.aborted || error?.name === 'AbortError') {
+    if (transferId) await cancelTransfer(transferId);
+    emit({ phase: 'cancelled' });
+    return { ok: false, phase: 'cancelled', error: 'Cancelled', transferId };
   }
-  return uploadAndWait(file, t, res.data.uploadPathname, { emit, signal, waitMs });
+  const msg = error?.message || 'Transfer failed';
+  emit({ phase: 'failed', error: msg, retryable: Boolean(error?.retryable) });
+  return { ok: false, phase: 'failed', error: msg, reason: error?.reason, transferId, retryable: Boolean(error?.retryable) };
 }

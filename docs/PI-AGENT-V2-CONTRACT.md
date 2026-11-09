@@ -2,9 +2,21 @@
 
 **Status:**
 - The website side is implemented and tested against a simulated protocol-2 Pi.
-- **Agent 1.1 (Phase 4) implements §4 pairing codes only.** It announces
-  `capabilities: ["pairing"]` and stays on protocol 1 (no transfer changes).
-  See §4a for the files and how to update a Pi.
+- **Agent 2.2 (`N-Signage/app/cloud_agent.py`) implements protocol 2:**
+  `sha256`, `range-resume`, `progress`, `storage` and `private-blob`.
+  **Pairing codes are switched off** (`PAIRING_ENABLED = False`): customers add a
+  display with Add Device → Pi Name → Find IP on the same Wi-Fi. The website's
+  pairing endpoints remain only for rollback and are not offered in the UI.
+  It is tested end to end against the website, the real `@vercel/blob` SDK and a
+  stand-in for the Vercel Blob API (`tests/blob-relay.test.mjs`), with unit tests in
+  `tests/helpers/test_cloud_agent_v2.py`. Not yet run on a real Pi. See §4b.
+- Agent 1.1 (Phase 4) implemented §4 pairing codes only (`capabilities: ["pairing"]`).
+- **Installed MPV-based Pis** (`/home/ns/n-signage`) run their own self-contained agent
+  2.0-ns1 ("V2.1"; unchanged reference copy in `N-Signage/mpv-agent/cloud_agent_v2.1.py`).
+  It stays as it is. **Media no longer travels through sync at all**: the website sends no
+  download commands. Files go from the browser, end-to-end encrypted, to the separate
+  upload receiver (`N-Signage/upload-receiver/`, see [DIRECT-UPLOAD.md](DIRECT-UPLOAD.md)).
+  The private-Blob agent 2.2-ns1 prepared earlier is withdrawn.
 - Pis running agent 1.0 keep working unchanged (tested with a frozen copy of
   the released 1.0 agent in `tests/fixtures/agent-1.0/`).
 
@@ -38,7 +50,10 @@ capabilities it really implements, and the website uses only those.
 | `pairing` | Implements §4 (pairing code on screen). Needed so the website can offer "pairing code" to link old devices. |
 | `private-blob` | Accepts download URLs on `*.private.blob.vercel-storage.com` (presigned, valid 30 min; may change on every sync). Required before the site can use `NSIGNAGE_BLOB_ACCESS=private`. |
 
-Unknown capability strings are ignored by the server.
+Unknown capability strings are ignored by the server. Announce a capability only
+when it is fully implemented: the website relies on it (for example, a Pi that
+announces `sha256` must report `sha256` + `size` with every successful download, or
+the result is rejected as `unverified-result`).
 
 ## 2. Download command (already sent today)
 
@@ -93,7 +108,10 @@ treat "already gone" as success.
 | `insufficient-storage` | not enough free space |
 | `download-failed` | network or HTTP error after retries |
 | `unsupported-type` | extension not allowed |
-| `untrusted-url` | host not allowed |
+| `untrusted-url` | host, port, scheme, redirect target or URL path not allowed |
+| `too-large` | `size` above the agent's limit |
+| `unverified-result` | (set by the website) a `sha256`-capable Pi reported success without `sha256` + `size` |
+| `bad-filename` | (set by the website) the reported saved name is not a media name with the transfer's extension |
 
 The website marks a transfer **completed** only on `ok: true`. With `sha256`
 it shows "checksum verified". If the reported `sha256` or `size` differs from
@@ -139,6 +157,22 @@ Not touched: uploads, media API, playback logic, UDP discovery, the systemd unit
 4. Expect the log line "New pairing code shown on the display" from `journalctl -u n-signage-cloud`.
 
 **Rollback:** copy back the 1.0 versions of the five files and restart the same two services. The website keeps working with 1.0.
+
+## 4b. Agent 2.2: download rules as implemented
+
+- **Trusted URLs only:**
+  - `https` on port 443, no user info;
+  - host `*.public.blob.vercel-storage.com`, or `*.private.blob.vercel-storage.com` (with `private-blob`);
+  - the path must be `/transfers/<deviceId>/<transferId>/…` of this command.
+- **Redirects:** every redirect target must pass the same check (at most 3), else `untrusted-url`.
+- **Credentials:** the Pi never gets a storage credential. Private URLs are presigned and expire after 30 minutes. A `403` is treated as an expired URL: the agent keeps the `.part` and resumes with the fresh URL from the next sync.
+- **Transient failures:** network errors, `403`, `429` and `5xx` are retried up to 5 times locally before `download-failed` is reported. `404`/`410` (copy gone) is final.
+- **Duplicates:** `data/cloud_transfers.json` remembers the last 500 saved transfers (`transferId` → name, size, SHA-256). A repeated command re-hashes the saved file and reports it again instead of downloading a second copy. Different transfers with the same name become `promo.mp4`, `promo_1.mp4`, …
+- **Cleanup of temp files:**
+  - failed checksums, oversize data and insufficient storage remove the `.part` file;
+  - interrupted downloads keep it for resume;
+  - `.part` files are removed after 72 h, or 1 h after the cloud stops listing the transfer.
+- **Website side:** a late success of a superseded attempt completes the transfer and withdraws the newer command. Repeated reports of the same command are ignored. The relay copy is deleted only after a verified success.
 
 ## 5. Device identity (recommended hardening)
 

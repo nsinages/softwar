@@ -1,0 +1,53 @@
+[Unit]
+Description=N-Signage direct upload receiver (end-to-end encrypted, 127.0.0.1 only)
+Documentation=file:///home/ns/n-signage/upload/README
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Same user as the media folder owner (ns:ns 775): no ownership or permission changes needed,
+# and the MPV player reads the saved files exactly like files from the existing agent.
+User=ns
+Group=ns
+WorkingDirectory=/home/ns/n-signage/upload
+EnvironmentFile=/etc/n-signage-upload.env
+ExecStart=/usr/bin/python3 /home/ns/n-signage/upload/receiver.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+UMask=0022
+
+# --- Sandbox: write ONLY media/ and its own data/upload/; read the identity files only ---
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ns/n-signage/media /home/ns/n-signage/data/upload
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Inbound: 127.0.0.1 only (bound in code). Outbound: the website (HTTPS) for heartbeat/check/result.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# --- Keep playback smooth on a Pi 3B+ (1 GB RAM) ---
+MemoryHigh=96M
+MemoryMax=160M
+TasksMax=48
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

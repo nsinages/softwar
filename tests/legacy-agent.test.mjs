@@ -1,7 +1,7 @@
 // Backward compatibility: the unmodified Pi agent 1.0 (frozen copy of the released
-// cloud_agent.py in tests/fixtures/agent-1.0) syncs
-// with the new API (Supabase/PostgreSQL storage), receives a relay transfer, saves the file, and the website
-// marks it completed (saved, not checksum-verified) and deletes the relay copy.
+// cloud_agent.py in tests/fixtures/agent-1.0) still syncs with the website, is found
+// with Find IP and claimed. Media no longer travels through sync (no relay, no download
+// commands): the agent keeps working and is simply never asked to download anything.
 // Needs Python 3 on PATH ("python" or "python3"). Run: npm test
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,9 +9,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { setupEnv, memoryBlob, Client, footprint, deleteFootprint } from './helpers/harness.js';
+import { setupEnv, Client, footprint, deleteFootprint } from './helpers/harness.js';
 
 const IP = '198.51.100.77';
 footprint.ips.add(IP); // the agent's own requests (not sent through Client) use this IP
@@ -19,8 +18,8 @@ footprint.ips.add(IP); // the agent's own requests (not sent through Client) use
 const REMOTE = Boolean(process.env.TEST_DATABASE_URL);
 const AGENT_SECONDS = REMOTE ? 150 : 25;
 const WAIT_MS = REMOTE ? 120000 : 20000;
-let database; let server; let db; let baseUrl; let blob; let work;
-let auth; let devices; let find; let sync; let transfer; let blobStore;
+let database; let server; let db; let baseUrl; let work;
+let auth; let devices; let find; let sync;
 
 const python = ['python3', 'python'].find((p) => spawnSync(p, ['--version']).status === 0);
 
@@ -31,10 +30,6 @@ before(async () => {
   ({ default: devices } = await import('../api/devices.js'));
   ({ default: find } = await import('../api/find.js'));
   ({ default: sync } = await import('../api/pi/sync.js'));
-  ({ default: transfer } = await import('../api/transfer.js'));
-  blobStore = await import('../api/_lib/blobStore.js');
-  blob = memoryBlob();
-  blobStore.setBlobBackend(blob.backend);
   work = fs.mkdtempSync(path.join(os.tmpdir(), 'nsignage-agent-'));
   // Real HTTP endpoint for the Python agent, adapted to the Vercel handler shape
   server = http.createServer((req, res) => {
@@ -83,7 +78,7 @@ const waitFor = async (fn, ms = WAIT_MS) => {
   }
 };
 
-test('unmodified agent 1.0: find, claim, relay transfer, completion, copy deleted', { timeout: (AGENT_SECONDS + 60) * 1000, skip: !python && 'Python not installed' }, async () => {
+test('unmodified agent 1.0: still syncs, found and claimed; never receives a download command', { timeout: (AGENT_SECONDS + 60) * 1000, skip: !python && 'Python not installed' }, async () => {
   const mapFile = path.join(work, 'blobmap.json');
   fs.writeFileSync(mapFile, '{}');
   const proc = spawn(python, [path.resolve('tests/helpers/run_legacy_agent.py')], {
@@ -112,28 +107,17 @@ test('unmodified agent 1.0: find, claim, relay transfer, completion, copy delete
     assert.equal(found.username, 'nsignage');
     assert.equal((await owner.call(devices, { method: 'POST', body: { claimNonce: found.claimNonce } })).status, 200);
 
-    const bytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), crypto.randomBytes(300_000)]);
-    const sha = crypto.createHash('sha256').update(bytes).digest('hex');
-    const c = await owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: start.deviceId, filename: 'Menu Board.jpg', size: bytes.length, sha256: sha } });
-    assert.equal(c.status, 200);
-    const url = blob.put(c.body.uploadPathname, bytes);
-    const local = path.join(work, 'relay.bin');
-    fs.writeFileSync(local, bytes);
-    fs.writeFileSync(mapFile, JSON.stringify({ [url]: local }));
-    const commit = await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: c.body.transfer.id, url } });
-    assert.equal(commit.body.transfer.state, 'queued');
-
-    const done = await waitFor(async () => {
-      const s = await owner.call(transfer, { query: { action: 'status', id: c.body.transfer.id } });
-      return ['completed', 'failed'].includes(s.body.transfer.state) && s.body.transfer;
+    // A leftover download command from the old relay flow is withdrawn, never handed to the agent
+    await db.asSystem((t) => t`insert into nsignage.device_commands (device_id, type, payload)
+      values (${start.deviceId}, 'download', ${t.json({ url: 'https://x.public.blob.vercel-storage.com/media/a.jpg', filename: 'a.jpg' })})`);
+    await waitFor(async () => {
+      const [c] = await db.asSystem((t) => t`select state from nsignage.device_commands where device_id = ${start.deviceId} and type = 'download'`);
+      return c.state === 'withdrawn';
     });
-    assert.equal(done.state, 'completed', JSON.stringify(done));
-    assert.equal(done.verified, false, 'agent 1.0 cannot verify checksums');
-    assert.equal(done.savedAs, 'Menu Board.jpg');
-    assert.ok(!blob.blobs.has(url), 'relay copy deleted');
-    const saved = fs.readFileSync(path.join(work, 'media', 'Menu Board.jpg'));
-    assert.equal(crypto.createHash('sha256').update(saved).digest('hex'), sha, 'bytes on the "Pi" match the original');
-    assert.deepEqual(fs.readdirSync(path.join(work, 'media')).filter((f) => f.startsWith('.')), [], 'no temp files left');
+    const [d] = await db.asSystem((t) => t`select agent_version, owner_id is not null as owned, extract(epoch from now() - last_seen_at)::int as age
+                                          from nsignage.devices where id = ${start.deviceId}`);
+    assert.equal(d.agent_version, '1.0'); assert.equal(d.owned, true); assert.ok(d.age < 30, 'still checking in');
+    assert.deepEqual(fs.readdirSync(path.join(work, 'media')), [], 'nothing downloaded');
   } finally {
     proc.kill();
     await exited;

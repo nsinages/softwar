@@ -9,6 +9,11 @@ Only two things are stubbed, because this runs on a developer PC, not a Pi:
     listed in BLOB_MAP), since the agent only downloads over HTTPS from
     *.public.blob.vercel-storage.com
 Env: CLOUD_URL, WORKDIR, BLOB_MAP (json file {url: local_path}), DURATION
+     RELAY_FETCH=1 (agent 2.x): HTTPS requests of the agent's download opener are
+     forwarded to <CLOUD_URL>/__blob?url=<original url> (Range header kept), where the
+     test serves the relay copy exactly as the Blob CDN would (presigned signature
+     checked). Everything else in the agent (URL and redirect checks, resume,
+     SHA-256, placement) runs unchanged.
 """
 import io
 import json
@@ -48,6 +53,9 @@ import device_identity  # noqa: E402
 # DEVICE_ID: simulate a specific Pi (several simulated Pis can run on one PC)
 if os.environ.get('DEVICE_ID'):
     device_identity._DEVICE_ID = os.environ['DEVICE_ID']
+# PI_HOSTNAME: the hostname the simulated Pi reports (Find IP matches username or hostname)
+if os.environ.get('PI_HOSTNAME'):
+    device_identity.get_hostname = lambda: os.environ['PI_HOSTNAME']
 
 cloud_agent.SECRET_FILE = os.path.join(config.DATA_FOLDER, 'cloud_secret')
 real_urlopen = cloud_agent.urllib.request.urlopen
@@ -72,6 +80,27 @@ def fake_urlopen(req, timeout=None):
 
 
 cloud_agent.urllib.request.urlopen = fake_urlopen
+
+if os.environ.get('RELAY_FETCH') == '1' and hasattr(cloud_agent, 'EXTRA_HANDLERS'):
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    import urllib.response
+
+    class RelayHTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            target = f"{os.environ['CLOUD_URL']}/__blob?{urllib.parse.urlencode({'url': req.full_url})}"
+            headers = {k: v for k, v in req.header_items() if k.lower() == 'range'}
+            try:
+                r = real_urlopen(urllib.request.Request(target, headers=headers), timeout=30)
+                body, hdrs, code = r.read(), r.headers, r.status
+            except urllib.error.HTTPError as e:
+                body, hdrs, code = e.read(), e.headers, e.code
+            resp = urllib.response.addinfourl(io.BytesIO(body), hdrs, req.full_url, code)
+            resp.msg = 'OK' if code < 400 else 'Error'
+            return resp
+
+    cloud_agent.EXTRA_HANDLERS = [RelayHTTPS()]
 
 agent = cloud_agent.Agent()
 print(json.dumps({'event': 'start', 'deviceId': agent.device_id, 'agentVersion': cloud_agent.AGENT_VERSION}), flush=True)

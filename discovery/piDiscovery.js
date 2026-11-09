@@ -15,7 +15,10 @@
 //   2. mDNS fallback (only if no Pi answered the broadcast):
 //      DNS-SD `_nsignage._tcp.local` / `<identifier>.local` A record, then the
 //      OS `.local` resolver in case the multicast socket is blocked.
-// A Pi is only accepted when the Linux username IT reports (broadcast reply or
+// The Pi Name typed by the customer matches the Pi's Linux username OR its
+// hostname (shared/piName.js). UDP broadcast on port 50500 stays the primary
+// method, mDNS the fallback; neither protocol changed.
+// A Pi is only accepted when the username/hostname IT reports (broadcast reply or
 // `/api/status.pi_username`) matches the identifier. Every match is then
 // checked against the Pi Flask API `/api/status` for online status.
 //
@@ -23,6 +26,7 @@
 // store here; registration happens in the website's Add Device form.
 // =============================================
 
+import { isValidPiName, piNameMatch, PI_NAME_HINT } from '../shared/piName.js';
 import dgram from 'node:dgram';
 import os from 'node:os';
 import dns from 'node:dns/promises';
@@ -420,12 +424,12 @@ async function verifyAnnounced(pi, log) {
   return { ...pi, online, method: 'udp-broadcast', identityVerified: true };
 }
 
-// mDNS fallback: only the hostname matched, so the username MUST come from
-// the Pi's /api/status before the address is accepted.
-async function verifyMdnsCandidate(candidate, identifier, log) {
+// mDNS fallback: only a DNS name matched, so the Pi's own /api/status must
+// confirm the Pi Name (its username or hostname) before the address is accepted.
+export async function verifyMdnsCandidate(candidate, identifier, log = () => {}) {
   const { online, status } = await checkStatus(candidate.ip, candidate.port, log);
-  if (!online || !sameUser(status?.pi_username, identifier)) {
-    log(`${candidate.ip}: username not confirmed by the Pi — not accepted.`);
+  if (!online || !piNameMatch(identifier, { username: status?.pi_username, hostname: status?.hostname })) {
+    log(`${candidate.ip}: Pi Name not confirmed by the Pi — not accepted.`);
     return null;
   }
   return {
@@ -480,7 +484,13 @@ async function mdnsFallback(identifier, log) {
 // =============================================
 // Public entry point
 // =============================================
-export async function findPi(identifier) {
+/**
+ * Find Pis whose username or hostname is `identifier` (the Pi Name).
+ * deps: { discover, mdnsFallback } replace the network steps in tests only.
+ */
+export async function findPi(identifier, deps = {}) {
+  const discover = deps.discover || udpDiscover;
+  const fallback = deps.mdnsFallback || mdnsFallback;
   const startedAt = Date.now();
   const logLines = [];
   const log = (msg) => {
@@ -488,22 +498,22 @@ export async function findPi(identifier) {
     console.log(`[PI DISCOVERY] ${msg}`);
   };
 
-  if (!isValidIdentifier(identifier)) {
-    return { found: false, identifier, reason: 'invalid-identifier', log: ['Username may contain only letters, numbers, "_", "." and "-".'] };
+  if (!isValidPiName(identifier)) {
+    return { found: false, identifier, reason: 'invalid-identifier', log: [PI_NAME_HINT] };
   }
 
-  log(`Looking for Pi with Linux username "${identifier}"`);
-  const announced = await udpDiscover(log);
-  const matching = announced.filter((pi) => sameUser(pi.username, identifier));
+  log(`Looking for Pi Name "${identifier}" (Linux username or hostname)`);
+  const announced = await discover(log);
+  const matching = announced.filter((pi) => piNameMatch(identifier, pi));
   const otherCount = announced.length - matching.length;
-  log(`${announced.length} N-Signage Pi(s) answered, ${matching.length} with username "${identifier}"`);
+  log(`${announced.length} N-Signage Pi(s) answered, ${matching.length} named "${identifier}"`);
 
   let devices;
   if (matching.length > 0) {
     devices = (await Promise.all(matching.map((pi) => verifyAnnounced(pi, log)))).filter(Boolean);
   } else if (announced.length === 0) {
     // Nothing answered the broadcast (responder not installed / UDP blocked)
-    devices = await mdnsFallback(identifier, log);
+    devices = await fallback(identifier, log);
   } else {
     devices = [];
   }
@@ -578,8 +588,8 @@ export function discoveryRequestHandler(req, res) {
   }
 
   const identifier = (url.searchParams.get('identifier') || '').trim();
-  if (!isValidIdentifier(identifier)) {
-    send(400, { found: false, reason: 'invalid-identifier', error: 'Enter the Pi\'s Linux username (letters, numbers, "_", "." or "-"), e.g. ns.' });
+  if (!isValidPiName(identifier)) {
+    send(400, { found: false, reason: 'invalid-identifier', error: PI_NAME_HINT });
     return;
   }
 

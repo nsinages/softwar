@@ -12,8 +12,6 @@ import {
   send, handleError, httpError, readJsonBody, requireSameOrigin, isOnline, MEDIA_NAME_RX,
 } from './_lib/cloud.js';
 import { withCustomer, requireOwnedDevice } from './_lib/auth.js';
-import { setContext } from './_lib/db.js';
-import { deleteRelayCopies } from './_lib/transfers.js';
 
 const CMD_ID_RX = /^[0-9a-f-]{36}$/i;
 
@@ -40,23 +38,13 @@ function statusAction(device) {
   };
 }
 
-async function mediaAction(t, device) {
-  const pending = await t`
-    select payload->>'filename' as name, (payload->>'size')::bigint as size, transfer_id
-    from nsignage.device_commands
-    where device_id = ${device.deviceId} and state = 'queued' and type = 'download'
-    order by created_at`;
-  // Previews only exist for files sent by the OLD flow (kept copies); new transfers keep none.
-  await setContext(t, 'system');
-  const legacy = await t`select filename, url from nsignage.legacy_relay_copies
-                         where device_id = ${device.deviceId} and deleted_at is null and filename is not null`;
-  const previews = Object.fromEntries(legacy.map((l) => [l.filename, l.url]));
-  const media = (device.media || []).map((m) => ({ ...m, url: previews[m.name] || null }));
+// The website keeps no copy of any media (no previews): only the names and sizes the Pi reports.
+function mediaAction(device) {
   return {
     ok: true,
     online: isOnline(device),
-    media,
-    pending: pending.map((p) => ({ name: p.name, pending: true, size: p.size || null, transferId: p.transfer_id || null })),
+    media: (device.media || []).map((m) => ({ ...m, url: null })),
+    pending: [],
   };
 }
 
@@ -68,13 +56,11 @@ export default async function handler(req, res) {
     }
     const deviceId = String(req.query?.deviceId || '');
     if (req.method === 'POST') requireSameOrigin(req);
-    let urls = [];
-
     const result = await withCustomer(req, async (t, { user }) => {
       const device = await requireOwnedDevice(t, user, deviceId, { allowSaved: true });
       if (device.registration === 'saved') {
         // Saved by the customer (name + IP) but no Pi has confirmed it: nothing to report or control yet
-        const notConnected = 'Saved in your account, but this display is not connected yet. Add it with "Find on this Wi-Fi" or its pairing code to verify it.';
+        const notConnected = 'Saved in your account, but this display is not connected yet. Add it with Find IP to verify it.';
         if (req.method === 'GET' && action === 'status') {
           return { ok: false, saved: true, online: false, lastSeen: null, error: notConnected, data: { status: 'unknown', ip: device.localIp, hostname: device.hostname } };
         }
@@ -82,7 +68,7 @@ export default async function handler(req, res) {
         throw httpError(409, notConnected, 'device-not-verified');
       }
       if (req.method === 'GET' && action === 'status') return statusAction(device);
-      if (req.method === 'GET' && action === 'media') return mediaAction(t, device);
+      if (req.method === 'GET' && action === 'media') return mediaAction(device);
       if (req.method === 'GET' && action === 'result') {
         const id = String(req.query?.id || '');
         if (!CMD_ID_RX.test(id)) throw httpError(400, 'Invalid command id');
@@ -100,15 +86,10 @@ export default async function handler(req, res) {
         // RLS (commands_owner) only allows commands for the customer's own Pi
         const [cmd] = await t`insert into nsignage.device_commands (device_id, type, payload)
                               values (${deviceId}, 'delete', ${t.json({ filename })}) returning id, created_at`;
-        // Remove the old cloud copy too, if this file came through the pre-transfer flow
-        await setContext(t, 'system');
-        urls = (await t`select url from nsignage.legacy_relay_copies
-                        where device_id = ${deviceId} and filename = ${filename} and deleted_at is null`).map((r) => r.url);
         return { ok: true, command: { id: cmd.id, type: 'delete', filename, createdAt: cmd.created_at.getTime() } };
       }
       throw httpError(404, 'Unknown action');
     });
-    if (urls.length) await deleteRelayCopies(urls);
     send(res, 200, result);
   } catch (err) {
     handleError(res, err);

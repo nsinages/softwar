@@ -1,44 +1,61 @@
-// /api/transfer?action=<action> — send media to a Pi through the cloud relay.
-// This is a relay-based transfer (browser → Vercel Blob → Pi), not peer-to-peer.
-// Every action needs a logged-in customer who owns the target Pi.
-// Metadata: Supabase nsignage.transfers / device_commands. Media: Blob only, temporarily.
+// /api/transfer?action=<action> — send media to a Pi DIRECTLY (browser → Pi receiver),
+// end-to-end encrypted. The website never receives, stores or relays media bytes:
+// it checks ownership, records metadata and signs short-lived upload tickets.
+// Every action needs the logged-in customer who owns the target Pi.
 //
-//   POST action=create      { deviceId, filename, size, sha256 }  → { transfer, uploadPathname }
-//   POST action=blob-token  Vercel Blob client-upload token exchange (handleUpload)
-//   POST action=commit      { transferId, url }   upload finished → size + content check → queued for the Pi
-//   GET  action=status&id=  → { transfer }        state: created|queued|completed|failed|cancelled|expired
-//   GET  action=list        → { transfers }       this account's recent transfers
-//   POST action=cancel      { transferId }
-//   POST action=retry       { transferId }        → { transfer, needsUpload, uploadPathname? }
+//   GET  action=target&deviceId=   → { receiver }   Pi receiver URL, public key, online, limits
+//   POST action=create   { deviceId, filename, size, sha256, epk }  → { transfer, ticket, uploadUrl, chunkBytes }
+//   POST action=ticket   { transferId, epk }   new ticket (expired ticket, retry, resume with a new browser key)
+//   GET  action=status&id= → { transfer }       state: created|completed|failed|cancelled|expired
+//   GET  action=list     → { transfers }
+//   POST action=cancel   { transferId }
+//   POST action=confirm-key { deviceId, fingerprint }   owner accepts a changed receiver key
 //
-// A transfer is "completed" only after the Pi reports that it saved the file.
-import { handleUpload } from '@vercel/blob/client';
+// epk = the browser's one-time ECDH P-256 public key (public; its hash goes into the ticket).
+// "completed" is set only by the Pi's own report (api/pi/receiver.js).
 import {
-  send, handleError, httpError, readJsonBody, requireSameOrigin, isOnline, keyHash, DEVICE_ID_RX, SAVED_ID_RX,
+  send, handleError, httpError, readJsonBody, requireSameOrigin, keyHash, DEVICE_ID_RX, SAVED_ID_RX,
 } from './_lib/cloud.js';
 import { requireUser, withCustomer, requireOwnedDevice } from './_lib/auth.js';
 import { asSystem, rateLimit } from './_lib/db.js';
-import { blobConfigured } from './_lib/blobStore.js';
+import { ticketsConfigured } from './_lib/tickets.js';
 import {
-  createTransfer, uploadTokenOptions, uploadPathname, verifyUploadedCopy, commitTransfer, requireOwnTransfer, transferView,
-  listTransfers, cancelTransfer, retryTransfer, expireTransfers, deleteRelayCopies,
+  createDirectTransfer, ticketFor, renewTicket, requireOwnTransfer, transferView, listTransfers, cancelTransfer,
+  expireTransfers, receiverForOwner, receiverView, confirmReceiverKey, epkHash,
 } from './_lib/transfers.js';
 
-function requireBlob() {
-  if (!blobConfigured()) {
-    throw httpError(503, 'Media transfer storage is not configured. Connect a Vercel Blob store to this project.', 'blob-not-configured');
+function requireTickets() {
+  if (!ticketsConfigured()) {
+    console.error('[N-SIGNAGE UPLOAD] NSIGNAGE_TICKET_KEY is not configured');
+    throw httpError(503, 'Sending files is not available right now (upload signing is not configured on the server).', 'upload-not-configured');
   }
 }
+
+function checkDeviceId(deviceId) {
+  if (SAVED_ID_RX.test(deviceId)) {
+    throw httpError(409, 'This display is saved in your account but not connected yet, so files cannot be sent to it. Add it with Find IP first.', 'device-not-verified');
+  }
+  if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
+}
+
+const ticketResponse = (transfer, rc, { ticket, claims }) => ({
+  ok: true, transfer: transferView(transfer), ticket, ticketExpiresAt: claims.exp * 1000,
+  uploadUrl: `https://${rc.hostname}`, chunkBytes: claims.chunk,
+});
 
 export default async function handler(req, res) {
   try {
     const action = String(req.query?.action || '');
 
     if (req.method === 'GET') {
-      if (action !== 'list' && action !== 'status') throw httpError(404, 'Unknown action');
+      if (!['list', 'status', 'target'].includes(action)) throw httpError(404, 'Unknown action');
       const result = await withCustomer(req, async (t, { user }) => {
         if (action === 'list') return { ok: true, transfers: await listTransfers(t, user) };
-        return { ok: true, transfer: transferView(await requireOwnTransfer(t, user, req.query?.id)) };
+        if (action === 'status') return { ok: true, transfer: transferView(await requireOwnTransfer(t, user, req.query?.id)) };
+        const deviceId = String(req.query?.deviceId || '');
+        checkDeviceId(deviceId);
+        const device = await requireOwnedDevice(t, user, deviceId);
+        return { ok: true, receiver: receiverView(await receiverForOwner(t, deviceId), device) };
       });
       return send(res, 200, result);
     }
@@ -47,87 +64,61 @@ export default async function handler(req, res) {
     requireSameOrigin(req);
     const body = readJsonBody(req);
     const { user } = await requireUser(req);
-    let urls = [];
 
     if (action === 'create') {
-      requireBlob();
+      requireTickets();
       await rateLimit('transfer-create', keyHash(user.id), 120, 3600);
       const deviceId = String(body.deviceId || '');
-      if (SAVED_ID_RX.test(deviceId)) {
-        throw httpError(409, 'This display is saved in your account but not connected yet, so files cannot be sent to it. Verify it first with "Find on this Wi-Fi" or its pairing code.', 'device-not-verified');
-      }
-      if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
-      // Opportunistic cleanup of a few overdue transfers (the daily cron does the rest)
-      try {
-        const expired = await asSystem((t) => expireTransfers(t, 5));
-        await deleteRelayCopies(expired.deleteAfterCommit);
+      checkDeviceId(deviceId);
+      try { // opportunistic cleanup; the daily cron does the rest
+        await asSystem((t) => expireTransfers(t, 5));
       } catch (err) {
         console.warn('[N-SIGNAGE TRANSFER] cleanup', err.message);
       }
       const result = await withCustomer(req, async (t, { user: me }) => {
         const device = await requireOwnedDevice(t, me, deviceId);
-        const tr = await createTransfer(t, me, device, body);
-        return { ok: true, transfer: transferView(tr), uploadPathname: uploadPathname(tr), deviceOnline: isOnline(device) };
+        const rc = await receiverForOwner(t, deviceId);
+        const tr = await createDirectTransfer(t, me, device, rc, body);
+        return ticketResponse(tr, rc, ticketFor(tr, epkHash(body.epk)));
       });
       return send(res, 200, result);
     }
 
-    if (action === 'blob-token') {
-      requireBlob();
-      if (body?.type !== 'blob.generate-client-token') throw httpError(400, 'Unsupported upload event');
-      await rateLimit('transfer-token', keyHash(user.id), 300, 3600);
-      const out = await handleUpload({
-        request: req,
-        body,
-        onBeforeGenerateToken: async (pathname, clientPayload) => {
-          let payload;
-          try { payload = JSON.parse(clientPayload || '{}'); } catch { throw httpError(400, 'Invalid upload payload'); }
-          return withCustomer(req, async (t, { user: me }) => {
-            const tr = await requireOwnTransfer(t, me, payload.transferId);
-            await requireOwnedDevice(t, me, tr.deviceId);
-            return uploadTokenOptions(tr, pathname);
-          });
-        },
-        // No onUploadCompleted webhook: completion is confirmed by action=commit
-      });
-      return send(res, 200, out);
-    }
-
-    if (action === 'retry') await rateLimit('transfer-retry', keyHash(user.id), 60, 3600);
-
-    // Commit: check the relay copy (Blob network calls) with NO database transaction open
-    let verifiedPath = null;
-    if (action === 'commit') {
-      requireBlob();
-      const tr = await withCustomer(req, (t, { user: me }) => requireOwnTransfer(t, me, body.transferId));
-      verifiedPath = await verifyUploadedCopy(tr, body.url);
-    }
-
-    const result = await withCustomer(req, async (t, { user: me }) => {
-      const tr = await requireOwnTransfer(t, me, body.transferId);
-      if (action === 'commit') {
+    if (action === 'ticket' || action === 'retry') {
+      requireTickets();
+      await rateLimit('transfer-ticket', keyHash(user.id), 600, 3600);
+      const result = await withCustomer(req, async (t, { user: me }) => {
+        const tr = await requireOwnTransfer(t, me, body.transferId);
         const device = await requireOwnedDevice(t, me, tr.deviceId);
-        const { transfer, deleteAfterCommit } = await commitTransfer(t, tr, body.url, verifiedPath);
-        urls = deleteAfterCommit;
-        return { ok: true, transfer: transferView(transfer), deviceOnline: isOnline(device) };
-      }
-      if (action === 'cancel') {
-        // allowed even if the Pi was removed in the meantime
-        const { transfer, deleteAfterCommit } = await cancelTransfer(t, tr);
-        urls = deleteAfterCommit;
-        return { ok: true, transfer: transferView(transfer) };
-      }
-      if (action === 'retry') {
-        await requireOwnedDevice(t, me, tr.deviceId);
-        const { transfer, needsUpload } = await retryTransfer(t, tr);
-        return { ok: true, transfer: transferView(transfer), needsUpload, ...(needsUpload && { uploadPathname: uploadPathname(transfer) }) };
-      }
-      throw httpError(404, 'Unknown action');
-    });
-    if (urls.length) await deleteRelayCopies(urls); // after the commit
-    send(res, 200, result);
+        const rc = await receiverForOwner(t, tr.deviceId);
+        const { transfer, ticket, claims } = await renewTicket(t, tr, device, rc, body.epk);
+        return ticketResponse(transfer, rc, { ticket, claims });
+      });
+      return send(res, 200, result);
+    }
+
+    if (action === 'cancel') {
+      const result = await withCustomer(req, async (t, { user: me }) => {
+        const tr = await requireOwnTransfer(t, me, body.transferId); // allowed even if the Pi was removed meanwhile
+        return { ok: true, transfer: transferView(await cancelTransfer(t, tr)) };
+      });
+      return send(res, 200, result);
+    }
+
+    if (action === 'confirm-key') {
+      const deviceId = String(body.deviceId || '');
+      checkDeviceId(deviceId);
+      const result = await withCustomer(req, async (t, { user: me }) => {
+        const device = await requireOwnedDevice(t, me, deviceId);
+        const rc = await confirmReceiverKey(t, deviceId, String(body.fingerprint || ''));
+        console.log('[N-SIGNAGE UPLOAD] receiver key confirmed', JSON.stringify({ user: me.id, deviceId }));
+        return { ok: true, receiver: receiverView(rc, device) };
+      });
+      return send(res, 200, result);
+    }
+
+    throw httpError(404, 'Unknown action');
   } catch (err) {
     handleError(res, err);
   }
 }
-

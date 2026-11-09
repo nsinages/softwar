@@ -31,3 +31,9 @@ dist-ssr
 
 # local cloud-mode build (npm run dev:cloud)
 .cloud-dist/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+

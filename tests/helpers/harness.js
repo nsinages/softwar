@@ -1,5 +1,6 @@
 // Calls the real Vercel-style API handlers in-process, with a cookie jar per
-// simulated browser, a configurable client IP and an in-memory Blob backend.
+// simulated browser and a configurable client IP. There is no media storage to fake:
+// uploads go from the browser straight to the Pi's receiver.
 // Database: real PostgreSQL (see testDb.js).
 import crypto from 'node:crypto';
 import { setupDatabase } from './testDb.js';
@@ -9,33 +10,10 @@ export const ORIGIN = `https://${HOST}`;
 
 export async function setupEnv() {
   const database = await setupDatabase();
-  process.env.BLOB_READ_WRITE_TOKEN = `vercel_blob_rw_teststore123_${'x'.repeat(30)}`;
+  // Throwaway Ed25519 key that signs upload tickets in this test process only
+  process.env.NSIGNAGE_TICKET_KEY ||= crypto.generateKeyPairSync('ed25519').privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64');
   process.env.CRON_SECRET = 'cron-secret-for-tests';
   return database;
-}
-
-/** In-memory replacement for Vercel Blob. */
-export function memoryBlob() {
-  const blobs = new Map(); // url -> { bytes, pathname, uploadedAt }
-  return {
-    blobs,
-    put(pathname, bytes, { access = 'public', uploadedAt = Date.now() } = {}) {
-      const dot = pathname.lastIndexOf('.');
-      const withSuffix = `${pathname.slice(0, dot)}-${crypto.randomBytes(15).toString('base64url')}${pathname.slice(dot)}`;
-      const url = `https://teststore123.${access}.blob.vercel-storage.com/${withSuffix}`;
-      blobs.set(url, { bytes: Buffer.from(bytes), pathname: withSuffix, uploadedAt });
-      return url;
-    },
-    backend: {
-      async head(url) { const b = blobs.get(url); return b ? { size: b.bytes.length, contentType: 'x', pathname: b.pathname } : null; },
-      async del(urls) { for (const u of [].concat(urls)) blobs.delete(u); },
-      async list(prefix) {
-        return { blobs: [...blobs.entries()].filter(([, b]) => b.pathname.startsWith(prefix)).map(([url, b]) => ({ url, pathname: b.pathname, size: b.bytes.length, uploadedAt: b.uploadedAt })), cursor: null };
-      },
-      async readPrefix(url, n) { const b = blobs.get(url); if (!b) throw new Error('404'); return b.bytes.subarray(0, n); },
-      async presignGet(pathname, validUntil) { return `https://teststore123.private.blob.vercel-storage.com/${pathname}?sig=test&exp=${validUntil}`; },
-    },
-  };
 }
 
 function makeRes() {

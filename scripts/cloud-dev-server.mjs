@@ -16,6 +16,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { loadEnvFile, ENV_FILE } from './lib/env.mjs';
+import { devClientIp } from './lib/devClientIp.mjs';
 
 const args = process.argv.slice(2);
 const usePglite = args.includes('--pglite');
@@ -25,13 +26,10 @@ const DIST = path.resolve('.cloud-dist');
 
 let testHooks = null;
 if (usePglite) {
-  const { setupEnv, memoryBlob } = await import(pathToFileURL(path.resolve('tests/helpers/harness.js')).href);
-  await setupEnv();
-  const blobStore = await import(pathToFileURL(path.resolve('api/_lib/blobStore.js')).href);
-  const blob = memoryBlob();
-  blobStore.setBlobBackend(blob.backend);
+  const { setupEnv } = await import(pathToFileURL(path.resolve('tests/helpers/harness.js')).href);
+  await setupEnv(); // also sets a throwaway upload-ticket signing key for this process
   const db = await import(pathToFileURL(path.resolve('api/_lib/db.js')).href);
-  testHooks = { blob, db };
+  testHooks = { db };
   console.log('Database: in-process PostgreSQL (PGlite) with supabase/migrations applied');
 } else {
   if (!loadEnvFile() || !process.env.DATABASE_URL) {
@@ -50,7 +48,7 @@ if (!args.includes('--no-build')) {
 }
 
 const ROUTES = {};
-for (const name of ['auth', 'devices', 'device', 'find', 'transfer', 'health', 'pi/sync', 'pi/pairing', 'cron/cleanup']) {
+for (const name of ['auth', 'devices', 'device', 'find', 'transfer', 'health', 'pi/sync', 'pi/pairing', 'pi/receiver', 'cron/cleanup']) {
   ROUTES[`/api/${name}`] = (await import(pathToFileURL(path.resolve(`api/${name}.js`)).href)).default;
 }
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
@@ -62,11 +60,6 @@ const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://localhost');
     const raw = Buffer.concat(chunks);
     try {
-      if (testHooks && u.pathname === '/__test/blob-put') {
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ url: testHooks.blob.put(u.searchParams.get('pathname'), raw) }));
-        return;
-      }
       if (testHooks && u.pathname === '/__test/legacy') {
         const { tokenHash, browserId, deviceId, name, location } = JSON.parse(raw.toString());
         await testHooks.db.asSystem(async (t) => {
@@ -97,8 +90,11 @@ const server = http.createServer((req, res) => {
         req.query = Object.fromEntries(u.searchParams);
         const ct = String(req.headers['content-type'] || '');
         req.body = ct.includes('json') && raw.length ? JSON.parse(raw.toString()) : raw.toString();
-        // client network address (simulated per test run only in --pglite test mode)
-        req.headers['x-real-ip'] = (testHooks && req.headers['x-test-ip']) || req.socket.remoteAddress || '127.0.0.1';
+        // client network address: simulated per test run in --pglite test mode; otherwise a browser on
+        // this PC/LAN counts as this PC's public IP, as Vercel would see it (Find IP needs that)
+        req.headers['x-real-ip'] = testHooks
+          ? (req.headers['x-test-ip'] || req.socket.remoteAddress || '127.0.0.1')
+          : await devClientIp(req.socket.remoteAddress);
         await handler(req, res);
         return;
       }

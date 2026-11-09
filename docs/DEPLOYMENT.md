@@ -10,7 +10,7 @@ local change → tests (local + browser) → approval → push to GitHub main
 - **Vercel production branch:** `main`. The domain `software.nsinages.in` is assigned to Production.
 - **Database:** the existing Supabase project in Singapore. It is **shared** by local development and the live domain.
 - **Functions:** `vercel.json` → `"regions": ["sin1"]` (Singapore), next to the database.
-- **Media:** Vercel Blob is a temporary relay only. Files live on the Raspberry Pis; Supabase stores only metadata.
+- **Media:** never stored on the website. Browsers send files, end-to-end encrypted, directly to the Pis; Supabase stores only metadata.
 
 ## 1. Secrets
 
@@ -18,7 +18,7 @@ local change → tests (local + browser) → approval → push to GitHub main
 |---|---|---|---|
 | `DATABASE_URL` | yes | **yes, same value** | transaction pooler `:6543` as the restricted role `nsignage_api` |
 | `CRON_SECRET` | yes | **yes, same value** | authorises `/api/cron/cleanup` (daily) |
-| `BLOB_READ_WRITE_TOKEN` | optional (local upload tests) | **yes**: added automatically when a Blob store is connected to Production | temporary relay only |
+| `NSIGNAGE_TICKET_KEY` | optional (`npm test` makes its own) | **yes** (Sensitive) | signs upload tickets; see DIRECT-UPLOAD.md |
 | `SUPABASE_ADMIN_URL` | yes | **never** | project owner, only for `npm run db:setup` |
 | `ALLOW_REAL_DB_TESTS` | `0` | no | safety switch for `npm run test:supabase` |
 | `QA_n_*` | yes | no | QA/demo website logins |
@@ -31,7 +31,7 @@ local change → tests (local + browser) → approval → push to GitHub main
 
 1. **Vercel:**
    - add `DATABASE_URL` and `CRON_SECRET` (Production);
-   - Storage → Blob → create a store → **Connect** it to the project for **Production**, which sets `BLOB_READ_WRITE_TOKEN`;
+   - `NSIGNAGE_TICKET_KEY` from `npm run upload:keygen` (Production, Sensitive); see §2a. No Blob store is needed;
    - Settings → Functions → region **Singapore (sin1)**, if the dashboard offers it (`vercel.json` already asks for `sin1`).
 2. **Backup tag** of the old live version: `git tag live-2026-11-05 18c3de7` → `git push origin live-2026-11-05`.
 3. **Publish:** `git checkout main && git merge --ff-only phase2-supabase && git push origin main`.
@@ -39,8 +39,22 @@ local change → tests (local + browser) → approval → push to GitHub main
 5. **Check:**
    - `curl https://software.nsinages.in/api/health` → HTTP 200 with
      `"database":{"configured":true,"reachable":true,"role":"nsignage_api","rlsOnAllTables":true,"roleBypassesRls":false}`,
-     `"blob":{"configured":true}`, `"cron":{"configured":true}` and the `sin1` region;
+     `"upload":{"mode":"direct-e2e","ticketKey":true,"mediaStoredOnWebsite":false}`, `"cron":{"configured":true}` and the `sin1` region;
    - then the browser checks (register, login/logout, dashboard, devices, persistence, isolation, media pages, mobile/desktop) in Chrome and Edge.
+
+## 2a. Media uploads: direct and end-to-end encrypted (no Vercel Blob)
+
+The website never stores media. Uploads go from the browser, encrypted, straight to
+the Pi's upload receiver through a Cloudflare Tunnel. Design, DNS move, cost, Pi
+resources, deployment and rollback: **[DIRECT-UPLOAD.md](DIRECT-UPLOAD.md)**.
+
+Vercel settings for this:
+- `NSIGNAGE_TICKET_KEY`, from `npm run upload:keygen` (Production, Sensitive). Required.
+- `BLOB_*` and `NSIGNAGE_BLOB_ACCESS` are no longer used; remove them after the release.
+
+The installed MPV Pis keep their V2.1 cloud agent unchanged
+(`N-Signage/mpv-agent/cloud_agent_v2.1.py` is a reference copy). The upload receiver is a
+separate service installed with `N-Signage/upload-receiver/install-upload-receiver.sh`.
 
 ## 3. Every later change
 

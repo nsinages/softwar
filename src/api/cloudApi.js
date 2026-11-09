@@ -44,8 +44,11 @@ const deviceUrl = (device, action, extra = '') =>
  * Pis that synced with the cloud from this browser's network in the last
  * 2 minutes. `identifier` (Pi Linux username) is an optional filter.
  */
-export async function cloudFindPi(identifier = '') {
-  const q = identifier ? `?identifier=${encodeURIComponent(identifier)}` : '';
+export async function cloudFindPi(identifier = '', { ip = '' } = {}) {
+  const params = new URLSearchParams();
+  if (identifier) params.set('identifier', identifier);
+  if (ip) params.set('ip', ip);
+  const q = params.toString() ? `?${params}` : '';
   try {
     const res = await axios.get(`/api/find${q}`, { timeout: 15000 });
     return { log: [], devices: [], ...res.data };
@@ -213,7 +216,7 @@ export async function cloudMedia(device) {
   }
 }
 
-// Uploads to cloud devices go through ./transferApi.js (relay transfers with
+// Uploads to cloud devices go through ./transferApi.js (direct, encrypted transfers with
 // checksums, cancel/retry, and success only after the Pi confirms).
 
 async function sendCommand(device, command) {

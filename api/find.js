@@ -1,11 +1,17 @@
-// GET /api/find[?identifier=<pi-username>]
+// GET /api/find?identifier=<Pi Name>   — Add Device → "Find IP" on the hosted website
 //
 // Cloud replacement for LAN discovery. Returns the Raspberry Pis that synced
 // with the cloud in the last 2 minutes from the SAME public network as this
 // browser (same Wi-Fi → same router → same public IP / IPv6 /64).
 //
 // - Needs a logged-in customer account.
-// - The username is optional; when given it only filters the results.
+// - identifier = the Pi Name the customer typed. It matches the Pi's Linux
+//   username OR hostname (shared/piName.js). Without it, every nearby Pi is
+//   listed (kept for older clients). The nickname is never a search key.
+// - The Pi's IP is the one it reports itself; the customer never has to type it.
+// - Optional ip=<local IPv4> ("Enter IP manually"): only the Pi that checked in
+//   from THIS network and reports exactly that local IP matches. The IP narrows
+//   the search; it is never proof on its own (same network + token rules apply).
 // - Each Pi that no account owns yet gets a single-use, 3-minute claim nonce
 //   bound to this account and this network (stored hashed in
 //   nsignage.claim_nonces). POST /api/devices needs it, so a Pi can only be
@@ -13,12 +19,14 @@
 // - ownership: 'mine' (this account) | 'other' (another account) | 'available'.
 import {
   clientIp, networkKey, send, handleError, httpError, keyHash, sha256, randomToken,
-  USERNAME_RX, NEARBY_WINDOW_MS, publicView, networkClaimEnabled, deviceFromRow,
+  NEARBY_WINDOW_MS, publicView, networkClaimEnabled, deviceFromRow,
 } from './_lib/cloud.js';
+import { isValidPiName, piNameMatch, PI_NAME_HINT } from '../shared/piName.js';
 import { requireUser, withCustomer } from './_lib/auth.js';
 import { setContext, rateLimit } from './_lib/db.js';
 
 const NONCE_TTL_S = 180;
+const IPV4_RX = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
 export default async function handler(req, res) {
   try {
@@ -27,8 +35,13 @@ export default async function handler(req, res) {
     await rateLimit('find', keyHash(user.id), 40, 60);
 
     const identifier = String(req.query?.identifier || '').trim();
-    if (identifier && !USERNAME_RX.test(identifier)) {
-      send(res, 400, { found: false, reason: 'invalid-identifier', error: 'Pi username may only contain letters, numbers, "_", "." or "-".' });
+    if (identifier && !isValidPiName(identifier)) {
+      send(res, 400, { found: false, reason: 'invalid-identifier', error: PI_NAME_HINT });
+      return;
+    }
+    const ipFilter = String(req.query?.ip || '').trim();
+    if (ipFilter && !IPV4_RX.test(ipFilter)) {
+      send(res, 400, { found: false, reason: 'invalid-ip', error: 'Enter the Raspberry Pi\'s IP address, for example 192.168.1.120.' });
       return;
     }
 
@@ -37,7 +50,7 @@ export default async function handler(req, res) {
     if (!net) throw httpError(400, 'Could not determine your network address.', 'no-network');
     const claimAllowed = networkClaimEnabled();
 
-    const { devices, nearby } = await withCustomer(req, async (t, { user: me }) => {
+    const { devices, nearby, otherNames } = await withCustomer(req, async (t, { user: me }) => {
       // Looking at Pis this customer does not own yet: system context, limited columns returned
       await setContext(t, 'system');
       const rows = await t`
@@ -48,11 +61,14 @@ export default async function handler(req, res) {
         limit 50`;
       const now = Date.now();
       const out = [];
+      let skipped = 0;
       for (const r of rows) {
         const d = deviceFromRow(r);
-        if (identifier && d.username.toLowerCase() !== identifier.toLowerCase()) continue;
+        const matchedBy = identifier ? piNameMatch(identifier, d) : null;
+        if (identifier && !matchedBy) { skipped += 1; continue; }
+        if (ipFilter && d.localIp !== ipFilter) { skipped += 1; continue; }
         const ownership = d.ownerId === me.id ? 'mine' : d.ownerId ? 'other' : 'available';
-        const view = { ...publicView(d, now), ownership };
+        const view = { ...publicView(d, now), ownership, ...(matchedBy && { matchedBy }) };
         if (ownership === 'other') { delete view.ip; delete view.storage; } // nothing about other customers' Pis beyond identity
         if (ownership === 'available' && claimAllowed) {
           const nonce = randomToken();
@@ -64,7 +80,7 @@ export default async function handler(req, res) {
         out.push(view);
       }
       await t`delete from nsignage.claim_nonces where expires_at < now()`; // keep the table small
-      return { devices: out, nearby: rows.length };
+      return { devices: out, nearby: rows.length, otherNames: skipped };
     });
 
     const rank = { available: 0, mine: 1, other: 2 };
@@ -80,6 +96,9 @@ export default async function handler(req, res) {
       reason: found ? undefined : 'not-found',
       multiple: devices.length > 1,
       devices,
+      // Pis on this network whose name did not match (helps the "not found" message; no identities)
+      ...((identifier || ipFilter) && { otherCount: otherNames }),
+      ...(ipFilter && { ipFilter }),
       ...(single || {}),
       durationMs: Date.now() - started,
       log: [

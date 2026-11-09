@@ -19,7 +19,8 @@ import {
 import { getDevices } from '../data/store';
 import { getPiStatus, uploadMedia } from '../api/piApi';
 import { isCloudDevice, isCloudMode } from '../api/cloudApi';
-import { sendFileViaRelay, retryTransferWithFile, precheckFile } from '../api/transferApi';
+import { sendFileDirect, retryTransferWithFile, precheckFile } from '../api/transferApi';
+import { findLanRoute, uploadLan } from '../api/lanUpload';
 import { IMAGE_EXTS, VIDEO_EXTS } from '../../shared/mediaTypes';
 import UploadPanel from '../components/UploadPanel';
 import TransferStatus from '../components/TransferStatus';
@@ -122,7 +123,7 @@ export default function Upload() {
     setUploadStates(prev => ({ ...prev, [id]: { ...prev[id], ...u } }));
   }
 
-  // Map a relay transfer update to this page's per-device state
+  // Map a direct (encrypted) transfer update to this page's per-device state
   function onRelayUpdate(id, u) {
     const next = { relay: true };
     if (u.transferId) next.transferId = u.transferId;
@@ -154,11 +155,6 @@ export default function Upload() {
       case 'confirming':
         next.status = 'confirming';
         break;
-      case 'waiting':
-        next.status = 'waiting-live';
-        next.received = Number.isFinite(u.loaded) && u.loaded > 0;
-        next.progress = next.received && u.total ? Math.round((u.loaded / u.total) * 100) : 0;
-        break;
       case 'completed':
         next.status = 'success';
         next.verified = Boolean(u.transfer?.verified);
@@ -175,7 +171,7 @@ export default function Upload() {
     patch(id, next);
   }
 
-  // Final state from a relay result: "success" ONLY when the display confirmed
+  // Final state of a transfer: "success" ONLY when the display confirmed
   function settleRelay(id, r) {
     if (r.ok) {
       patch(id, { status: 'success', verified: Boolean(r.transfer?.verified), savedAs: r.transfer?.savedAs, error: undefined });
@@ -196,14 +192,42 @@ export default function Upload() {
     const ac = new AbortController();
     controllers.current[id] = ac;
     speeds.current[id] = null;
-    patch(id, { status: 'hashing', progress: 0, error: undefined, relay: true });
-    const opts = { signal: ac.signal, waitMs: 3 * 60 * 1000, onUpdate: u => onRelayUpdate(id, u) };
+    // Development only (VITE_LAN_DIRECT_UPLOAD): the customer's own Pi on this network gets the
+    // file straight from the browser. Not reachable / identity mismatch → normal cloud transfer.
+    if (!transferId) {
+      patch(id, { status: 'pending', progress: 0, error: undefined, lan: false });
+      const base = await findLanRoute(device, { signal: ac.signal });
+      if (base) {
+        await runLanDirect(id, base, file, ac);
+        delete controllers.current[id];
+        return;
+      }
+      if (ac.signal.aborted) {
+        delete controllers.current[id];
+        patch(id, { status: 'cancelled', error: 'Cancelled. Nothing was sent.' });
+        return;
+      }
+    }
+    patch(id, { status: 'hashing', progress: 0, error: undefined, relay: true, lan: false });
+    const opts = { signal: ac.signal, onUpdate: u => onRelayUpdate(id, u) };
     const r = transferId
       ? await retryTransferWithFile(transferId, file, opts)
-      : await sendFileViaRelay(device, file, opts);
+      : await sendFileDirect(device, file, opts);
     delete controllers.current[id];
     settleRelay(id, r);
     setHistoryKey(k => k + 1);
+  }
+
+  // Bytes go browser → Pi only. Once the request has started, a failure is shown as an
+  // error and is NOT retried through the cloud (the Pi may already hold part or all of it).
+  async function runLanDirect(id, base, file, ac) {
+    patch(id, { status: 'uploading', progress: 0, lan: true, relay: false });
+    const r = await uploadLan(base, file, {
+      signal: ac.signal,
+      onProgress: (loaded, total) => onRelayUpdate(id, { phase: 'uploading', loaded, total }),
+    });
+    if (r.ok) patch(id, { status: 'success', relay: false, lan: true, savedAs: r.savedAs, error: undefined });
+    else patch(id, { status: r.cancelled ? 'cancelled' : 'failed', relay: false, lan: true, savedAs: r.savedAs, error: r.error });
   }
 
   async function runLan(id, device, file) {
@@ -274,7 +298,7 @@ export default function Upload() {
     const file = sentFile.current || selectedFile;
     if (!device || !file) return;
     if (isCloudDevice(device)) {
-      // A failed transfer is retried (relay copy reused when it still exists);
+      // A failed transfer is resumed where the display stopped (same file, checked by SHA-256);
       // a cancelled one is sent again as a new transfer.
       await runRelay(id, device, file, state.status === 'failed' ? state.transferId : null);
     } else {
@@ -562,7 +586,7 @@ export default function Upload() {
                   )}
                   <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textAlign: 'center' }}>
                     {cloud
-                      ? 'Files go through the N-Signage cloud relay (a temporary copy, deleted after delivery) to each display. Success is shown only after the display confirms it saved the file.'
+                      ? 'Files are encrypted in this browser and sent directly to each display. The N-Signage website never stores or sees your media. Success is shown only after the display confirms it saved the file.'
                       : 'Files are transferred over LAN directly to each display unit.'}
                   </p>
                 </div>
@@ -799,7 +823,9 @@ function TargetRow({ id, state = { status: 'pending', progress: 0 }, onCancel, o
             {device?.nickName || device?.deviceId || 'Removed device'}
           </span>
           {device?.ip && !isCloudDevice(device) && <span className="ip-chip" style={{ fontSize: '11px' }}>{device.ip}</span>}
-          {isCloudDevice(device) && <span className="badge badge-neutral" style={{ fontSize: 10 }}>via cloud relay</span>}
+          {isCloudDevice(device) && (state.lan
+            ? <span className="badge badge-neutral" style={{ fontSize: 10 }}>local network, direct to display</span>
+            : <span className="badge badge-neutral" style={{ fontSize: 10 }}>encrypted, direct to display</span>)}
         </div>
       </div>
       <TransferStatus state={state} onCancel={onCancel} onRetry={onRetry} />

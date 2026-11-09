@@ -24,6 +24,7 @@ import LegacyDevicesPanel from '../components/LegacyDevicesPanel';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import PiDiscoveryPanel from '../components/PiDiscoveryPanel';
+import { isValidPiName, piNameMatch, PI_NAME_HINT } from '../../shared/piName';
 
 const EMPTY_FORM = {
   deviceId: '',
@@ -32,8 +33,7 @@ const EMPTY_FORM = {
   ip: '',
 };
 
-// Linux username (same rule as the discovery helper) and a strict IPv4 check
-const USERNAME_RX = /^[a-z0-9_][a-z0-9_.-]{0,31}$/i;
+// Strict IPv4 check (the Pi Name rule is shared/piName.js, same as the discovery helper)
 const IPV4_RX = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
 const sameUser = (a, b) =>
@@ -52,7 +52,8 @@ export default function Devices() {
   const [testResults, setTestResults] = useState({});
   const [testingId, setTestingId] = useState(null);
   const [searchQ, setSearchQ] = useState('');
-  const [discovered, setDiscovered] = useState(null); // Pi verified by Find Pi
+  const [discovered, setDiscovered] = useState(null); // Pi verified by Find IP
+  const [manualIp, setManualIp] = useState(false);     // local dashboard: "Enter IP manually" → Connect
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -124,6 +125,7 @@ export default function Devices() {
     setForm(EMPTY_FORM);
     setErrors({});
     setDiscovered(null);
+    setManualIp(false);
     setSubmitting(false);
     setFormError('');
   }
@@ -135,13 +137,13 @@ export default function Devices() {
       if (form.location.trim().length > 80) e.location = 'Location must be 80 characters or fewer';
       return e;
     }
-    if (!form.deviceId.trim()) e.deviceId = 'Pi Username / Device Identifier is required';
-    else if (!USERNAME_RX.test(form.deviceId.trim()))
-      e.deviceId = 'Enter the Pi\'s Linux username (letters, numbers, "_", "." or "-"), e.g. ns';
+    if (!form.deviceId.trim()) e.deviceId = 'Pi Name is required';
+    else if (!isValidPiName(form.deviceId))
+      e.deviceId = PI_NAME_HINT;
 
     if (form.nickName.trim().length > 64) e.nickName = 'Nickname must be 64 characters or fewer';
 
-    if (!form.ip.trim()) e.ip = 'IP address is required';
+    if (!form.ip.trim()) e.ip = editId || manualIp ? 'IP address is required' : 'Click "Find IP" to detect the Raspberry Pi\'s IP address.';
     else if (!IPV4_RX.test(form.ip.trim()))
       e.ip = 'Enter a valid IPv4 address (e.g. 10.10.40.94)';
     else if (getDevices().some(d => d.id !== editId && d.ip?.trim() === form.ip.trim()))
@@ -149,10 +151,11 @@ export default function Devices() {
     return e;
   }
 
-  // Add Device: confirm the Pi at this IP is reachable and really is the
-  // entered Linux user before using the existing registration (saveDevice).
+  // Add Device: the IP comes from Find IP (UDP broadcast / mDNS). Confirm the
+  // Pi at that IP is reachable and is the Pi that Find IP found for this Pi
+  // Name (username or hostname) before using the existing registration (saveDevice).
   async function registerNewDevice() {
-    const username = form.deviceId.trim();
+    const piName = form.deviceId.trim();
     const ip = form.ip.trim();
     const session = formSession.current;
     const current = getDevices();
@@ -175,21 +178,39 @@ export default function Devices() {
       return;
     }
 
-    // Username must come from the Pi itself: /api/status, or the Find Pi
-    // broadcast reply for this exact IP (Pis running older N-Signage builds).
+    // Identity must come from the Pi itself: the Find IP reply for this exact IP,
+    // and, when the Pi reports them, the same username and device id in /api/status.
+    // Manual IP: the Pi at that address must report a username or hostname that
+    // matches the Pi Name; an IP address alone is never accepted.
     const reported = status.data?.pi_username;
-    const verifiedByDiscovery = discovered && discovered.ip === ip && sameUser(discovered.username, username);
-    if (reported ? !sameUser(reported, username) : !verifiedByDiscovery) {
+    const reportedId = status.data?.device_id;
+    if (manualIp) {
+      const nameOk = piNameMatch(piName, { username: reported, hostname: status.data?.hostname });
+      if (!nameOk) {
+        setSubmitting(false);
+        setFormError(reported || status.data?.hostname
+          ? `The Raspberry Pi at ${ip} is "${status.data?.hostname || reported}", not "${piName}". Check the Pi Name or the IP address.`
+          : `The device at ${ip} did not report its name, so it cannot be confirmed as "${piName}". Use Find IP, or update the N-Signage software on the Pi.`);
+        return;
+      }
+      setDiscovered({ ip, username: reported, hostname: status.data?.hostname, deviceId: reportedId, method: 'manual' });
+    }
+    const found = manualIp ? { ip, username: reported, hostname: status.data?.hostname, deviceId: reportedId } : discovered;
+    const verifiedByDiscovery = Boolean(found && found.ip === ip && piNameMatch(piName, found));
+    const mismatch = verifiedByDiscovery && (
+      (reported && !sameUser(reported, found.username))
+      || (reportedId && found.deviceId && reportedId !== found.deviceId));
+    if (!verifiedByDiscovery || mismatch) {
       setSubmitting(false);
       setFormError(
-        reported
-          ? `The Raspberry Pi at ${ip} reports the username "${reported}", not "${username}". Check the username or the IP address.`
-          : `The Raspberry Pi at ${ip} did not confirm its username. Use Find Pi, or update the N-Signage software on the Pi.`
+        !verifiedByDiscovery
+          ? `Click "Find IP" to find the Raspberry Pi named "${piName}" first.`
+          : `The Raspberry Pi now answering at ${ip} is not the one Find IP found. Click "Find IP" again.`
       );
       return;
     }
 
-    const piDeviceId = status.data?.device_id || (verifiedByDiscovery ? discovered.deviceId : undefined);
+    const piDeviceId = status.data?.device_id || (verifiedByDiscovery ? found.deviceId : undefined);
     const sameHardware = piDeviceId && current.find(d => d.piDeviceId === piDeviceId);
     if (sameHardware) {
       setSubmitting(false);
@@ -197,9 +218,9 @@ export default function Devices() {
       return;
     }
 
-    const hostname = status.data?.hostname || (verifiedByDiscovery ? discovered.hostname : undefined);
+    const hostname = status.data?.hostname || (verifiedByDiscovery ? found.hostname : undefined);
     const saved = saveDevice({
-      deviceId: reported || discovered.username,
+      deviceId: reported || found.username,
       nickName: form.nickName.trim(),
       ip,
       ...(hostname && { hostname }),
@@ -676,20 +697,27 @@ export default function Devices() {
             ) : (
             <form onSubmit={handleSubmit}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-                {/* Device Identifier */}
+                {/* Pi Name: matches the Pi's Linux username or hostname */}
                 <div className="form-group">
-                  <label className="form-label">Pi Username / Device Identifier</label>
+                  <label className="form-label" htmlFor="lan-pi-name">Pi Name</label>
                   <input
+                    id="lan-pi-name"
                     className="form-input"
-                    placeholder="e.g. n-sinage"
+                    placeholder="e.g. ns001"
+                    required
+                    autoCapitalize="none"
+                    spellCheck={false}
                     value={form.deviceId}
                     onChange={e => {
-                      setForm(f => ({ ...f, deviceId: e.target.value }));
+                      const v = e.target.value;
+                      // a new Pi Name invalidates a Find IP result, but never a typed (manual) IP
+                      setForm(f => ({ ...f, deviceId: v, ...(!editId && !manualIp && { ip: '' }) }));
+                      setFormError('');
                       setDiscovered(null);
                     }}
                   />
                   {errors.deviceId && <span className="form-error">{errors.deviceId}</span>}
-                  <span className="form-hint">Host identifier configured on your Raspberry Pi</span>
+                  <span className="form-hint">The Raspberry Pi's username or hostname</span>
                 </div>
 
                 {/* Nickname */}
@@ -705,26 +733,42 @@ export default function Devices() {
                   {errors.nickName && <span className="form-error">{errors.nickName}</span>}
                 </div>
 
-                {/* V3 Discovery Panel */}
-                <PiDiscoveryPanel
+                {!editId && (
+                  <div>
+                    <button type="button" className="btn btn-ghost btn-sm"
+                      onClick={() => { setManualIp(m => !m); setDiscovered(null); setForm(f => ({ ...f, ip: '' })); setFormError(''); }}>
+                      {manualIp ? 'Use Find IP instead' : 'Enter IP manually'}
+                    </button>
+                  </div>
+                )}
+
+                {/* V3 Discovery Panel (Find IP) */}
+                {!manualIp && <PiDiscoveryPanel
                   key={form.deviceId.trim()}
                   identifier={form.deviceId}
                   onUseIp={ip => setForm(f => ({ ...f, ip }))}
                   onFound={setDiscovered}
-                />
+                />}
 
-                {/* IP Address */}
+                {/* IP Address: detected by Find IP; typed only with "Enter IP manually" or when editing */}
                 <div className="form-group">
-                  <label className="form-label">Raspberry Pi IP Address</label>
+                  <label className="form-label" htmlFor="lan-ip">Raspberry Pi IP Address</label>
                   <input
+                    id="lan-ip"
                     className="form-input"
-                    placeholder="e.g. 10.10.40.94"
+                    placeholder={editId || manualIp ? 'e.g. 10.10.40.94' : 'Detected by Find IP'}
                     value={form.ip}
-                    onChange={e => setForm(f => ({ ...f, ip: e.target.value }))}
-                    style={{ fontFamily: 'var(--font-mono)' }}
+                    readOnly={!editId && !manualIp}
+                    inputMode="decimal"
+                    onChange={e => { if (editId || manualIp) { const v = e.target.value; setForm(f => ({ ...f, ip: v })); setFormError(''); } }}
+                    style={{ fontFamily: 'var(--font-mono)', ...(!editId && !manualIp && { background: 'var(--bg-elevated)' }) }}
                   />
                   {errors.ip && <span className="form-error">{errors.ip}</span>}
-                  <span className="form-hint">Static or DHCP assigned local IPv4 address</span>
+                  <span className="form-hint">
+                    {editId ? 'Static or DHCP assigned local IPv4 address'
+                      : manualIp ? 'Type the Pi\'s IP address. Connect checks that the Pi at this address reports the Pi Name above.'
+                        : 'Filled in automatically when the Raspberry Pi is found'}
+                  </span>
                 </div>
 
                 {formError && (
@@ -742,15 +786,15 @@ export default function Devices() {
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={submitting || (!editId && !discovered)}
-                  title={!editId && !discovered ? 'Click "Find Pi" first' : undefined}
+                  disabled={submitting || (!editId && !manualIp && !discovered) || (manualIp && !form.ip.trim())}
+                  title={!editId && !manualIp && !discovered ? 'Click "Find IP" first' : undefined}
                 >
                   {submitting ? (
                     <>
                       <Loader2 size={14} className="spinner" style={{ border: 'none', animation: 'spin 0.8s linear infinite' }} />
                       Verifying Raspberry Pi...
                     </>
-                  ) : editId ? 'Save Changes' : 'Add Device'}
+                  ) : editId ? 'Save Changes' : manualIp ? 'Connect' : 'Add Device'}
                 </button>
               </div>
             </form>

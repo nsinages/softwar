@@ -8,7 +8,7 @@ import { getSettings } from '../data/store';
 import {
   isCloudDevice, cloudStatus, cloudMedia, cloudDelete,
 } from './cloudApi';
-import { sendFileViaRelay } from './transferApi';
+import { sendFileDirect } from './transferApi';
 import { MEDIA_TYPES, IMAGE_EXTS, VIDEO_EXTS, checkMediaFile } from '../../shared/mediaTypes';
 
 const STATUS_TIMEOUT = 5000;    // 5s for status checks
@@ -35,6 +35,20 @@ function piUrl(ip, port) {
   return PI_DIRECT ? `http://${ip}:${port}` : `/pi-proxy/${ip}/${port}`;
 }
 
+/**
+ * Where a LAN upload is sent. Media bytes go straight from the browser to the
+ * Pi (never through any server) whenever the request can be a CORS "simple
+ * request": a page served over http (no mixed-content block) and no API key
+ * (an X-API-Key header forces a preflight that Pi servers do not all answer).
+ * Pi servers send Access-Control-Allow-Origin: * on /api/upload. Otherwise the
+ * upload falls back to the same-origin /pi-proxy, as before.
+ */
+function piUploadUrl(ip, port) {
+  const httpPage = typeof window !== 'undefined' && window.location?.protocol === 'http:';
+  const direct = PI_DIRECT || (httpPage && !getSettings().apiKey);
+  return direct ? `http://${ip}:${port}/api/upload` : `${piUrl(ip, port)}/api/upload`;
+}
+
 function authHeaders() {
   const { apiKey } = getSettings();
   return apiKey ? { 'X-API-Key': apiKey } : {};
@@ -42,11 +56,11 @@ function authHeaders() {
 
 /**
  * URL of a media file on a Pi, usable in <img>/<video> src.
- * Cloud devices: the cloud copy of the file, or null when there is none
- * (a hosted website cannot load files straight from the Pi).
+ * Cloud devices: always null. The website keeps no copy of any media, and a
+ * hosted website cannot load files straight from the Pi.
  */
-export function piMediaUrl(device, filename, media = null) {
-  if (isCloudDevice(device)) return media?.url || null;
+export function piMediaUrl(device, filename) {
+  if (isCloudDevice(device)) return null;
   return `${piUrl(device.ip, devicePort(device))}/media/${encodeURIComponent(filename)}`;
 }
 
@@ -149,9 +163,9 @@ export async function uploadMedia(device, file, onProgress = null) {
   const typeError = checkMediaFile(file.name, file.type);
   if (typeError) return { ok: false, error: typeError };
 
-  // Cloud devices: relay transfer; ok only once the Pi confirmed it saved the file
+  // Cloud devices: direct, end-to-end encrypted transfer; ok only once the Pi confirmed it saved the file
   if (isCloudDevice(device)) {
-    const r = await sendFileViaRelay(device, file, {
+    const r = await sendFileDirect(device, file, {
       onUpdate: (u) => { if (u.phase === 'uploading' && u.total) onProgress?.(Math.round((u.loaded / u.total) * 100)); },
     });
     return r.ok ? { ok: true, data: { filename: r.transfer?.savedAs } } : { ok: false, error: r.error || 'Transfer not completed yet', transfer: r };
@@ -161,7 +175,7 @@ export async function uploadMedia(device, file, onProgress = null) {
   formData.append('file', file);
 
   try {
-    const res = await axios.post(`${piUrl(device.ip, devicePort(device))}/api/upload`, formData, {
+    const res = await axios.post(piUploadUrl(device.ip, devicePort(device)), formData, {
       timeout: UPLOAD_TIMEOUT,
       headers: authHeaders(),
       onUploadProgress: (progressEvent) => {

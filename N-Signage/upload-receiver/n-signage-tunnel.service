@@ -1,0 +1,43 @@
+[Unit]
+Description=N-Signage Cloudflare Tunnel (forwards this Pi's upload hostname to 127.0.0.1:8090 only)
+After=network-online.target n-signage-upload.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Own restricted, transient system user: no shell, no home, no access to /home/ns at all.
+DynamicUser=yes
+# TUNNEL_TOKEN=<token from scripts/provision-tunnel.mjs>; file is root:root 0600, read by systemd before dropping privileges
+EnvironmentFile=/etc/n-signage-tunnel.env
+# Remotely managed tunnel: its only ingress rule is <hostname> → http://127.0.0.1:8090, everything else 404.
+# http2 over TCP 443 works through most mobile carrier NAT; change to "auto" to allow QUIC (UDP 7844).
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --protocol http2 --metrics 127.0.0.1:0 run
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryHigh=80M
+MemoryMax=128M
+TasksMax=64
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

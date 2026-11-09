@@ -1,8 +1,8 @@
 // /api/devices — the Raspberry Pis registered to the logged-in customer account.
 //
 //   GET                                          list this account's Pis (+ live status)
-//   POST   { claimNonce, name?, location? }      Add Device found by Find Pi (same Wi-Fi proof)
-//   POST   ?action=pair { code, name?, location? }   Add Device with the pairing code shown on the Pi
+//   POST   { claimNonce, name?, location? }      Add Device: Pi Name → Find IP (same Wi-Fi proof)
+//   POST   ?action=pair { code, name?, location? }   pairing code (not offered in the UI; kept for rollback)
 //   POST   ?action=save { name, ip, hostname?, deviceUid?, code?, location? }
 //                                                Add Device by name + IP address. Without a pairing code the
 //                                                record is SAVED (status unknown) until the Pi itself is verified.
@@ -12,7 +12,7 @@
 //   DELETE ?deviceId=<id>                        unregister (media on the Pi is not touched)
 //
 // Ownership is always proven, never assumed:
-//   - Find Pi: the browser and the Pi share the same public network right now
+//   - Find IP: the browser and the Pi share the same public network right now
 //     (single-use 3-minute nonce bound to this account and that network), or
 //   - pairing code: the customer can read the code on that display's screen.
 // Every ownership change is ONE database transaction; claims are single
@@ -26,7 +26,7 @@ import net from 'node:net';
 import { withCustomer, requireUser, linkDevice, legacyBrowserId, requireOwnedDevice } from './_lib/auth.js';
 import { setContext, rateLimit } from './_lib/db.js';
 import { redeemPairCode } from './_lib/pairing.js';
-import { cancelDeviceTransfers, deleteRelayCopies } from './_lib/transfers.js';
+import { cancelDeviceTransfers } from './_lib/transfers.js';
 
 const NONCE_RX = /^[A-Za-z0-9_-]{20,100}$/;
 const HOSTNAME_RX = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
@@ -74,23 +74,23 @@ async function onSameNetwork(t, req, deviceId) {
 
 async function claimByNonce(t, req, user, body) {
   if (!networkClaimEnabled()) {
-    throw httpError(403, 'Use the pairing code shown on the display to add it.', 'network-claim-disabled');
+    throw httpError(403, 'Adding displays found on this Wi-Fi is turned off on this website. Please contact support.', 'network-claim-disabled');
   }
   const nonce = String(body.claimNonce || '');
-  if (!NONCE_RX.test(nonce)) throw httpError(400, 'Click "Find Pi" first, then Add Device.', 'missing-nonce');
+  if (!NONCE_RX.test(nonce)) throw httpError(400, 'Click "Find IP" first, then Add Device.', 'missing-nonce');
   await setContext(t, 'system');
   // single use: the row is deleted as it is read
   const [grant] = await t`delete from nsignage.claim_nonces
                           where nonce_hash = ${sha256(nonce)} and expires_at > now() returning *`;
   if (!grant || grant.user_id !== user.id) {
-    throw httpError(410, 'This search result has expired. Click "Find Pi" again.', 'nonce-expired');
+    throw httpError(410, 'This search result has expired. Click "Find IP" again.', 'nonce-expired');
   }
   if (grant.net_key !== networkKey(clientIp(req))) {
-    throw httpError(403, 'Your network changed since the search. Connect to the same Wi-Fi as the Pi and click "Find Pi" again.', 'network-changed');
+    throw httpError(403, 'Your network changed since the search. Connect to the same Wi-Fi as the Pi and click "Find IP" again.', 'network-changed');
   }
   const [d] = await t`select last_seen_at from nsignage.devices where id = ${grant.device_id}`;
   if (!d || Date.now() - d.last_seen_at.getTime() > NEARBY_WINDOW_MS) {
-    throw httpError(409, 'The Raspberry Pi went offline. Check its power and Wi-Fi, then click "Find Pi" again.', 'pi-offline');
+    throw httpError(409, 'The Raspberry Pi went offline. Check its power and Wi-Fi, then click "Find IP" again.', 'pi-offline');
   }
   const device = await linkDevice(t, user, grant.device_id, {
     name: cleanText(body.name, 64), location: cleanText(body.location, 80), via: 'network',
@@ -200,7 +200,7 @@ async function linkLegacy(t, req, user, body) {
   } else if (await onSameNetwork(t, req, deviceId)) {
     via = 'legacy+network';
   } else {
-    throw httpError(403, 'To confirm this display is yours, connect this phone or computer to the same Wi-Fi as the display (or enter the pairing code shown on it), then try again.', 'verify-required');
+    throw httpError(403, 'To confirm this display is yours, connect this phone or computer to the same Wi-Fi as the display, then try again.', 'verify-required');
   }
   const device = await linkDevice(t, user, deviceId, { name: legacy.name || '', location: legacy.location || '', via });
   return { ok: true, device: view(device) };
@@ -236,13 +236,13 @@ async function remove(t, user, deviceId) {
     // A saved record belongs only to this customer: delete it (its events go with it)
     await t`delete from nsignage.devices where id = ${deviceId} and owner_id = ${user.id} and registration = 'saved'`;
     await t`insert into nsignage.security_events (event, user_id, device_id) values ('device-removed', ${user.id}, ${deviceId})`;
-    return { result: { ok: true }, urls: [] };
+    return { ok: true };
   }
-  const urls = await cancelDeviceTransfers(t, deviceId, 'Device removed from the account');
+  await cancelDeviceTransfers(t, deviceId, 'Device removed from the account');
   await t`update nsignage.device_commands set state = 'withdrawn' where device_id = ${deviceId} and state = 'queued'`;
   await t`delete from nsignage.pairing_codes where device_id = ${deviceId}`;
   await t`delete from nsignage.legacy_browser_devices where device_id = ${deviceId}`;
-  const legacy = await t`select url from nsignage.legacy_relay_copies where device_id = ${deviceId} and deleted_at is null`;
+  await t`delete from nsignage.device_receivers where device_id = ${deviceId}`; // a new owner pins the receiver key afresh
   // Unclaim, and let the Pi register a fresh secret (SD card re-flash). Files on the Pi are NOT deleted.
   const [r] = await t`update nsignage.devices
                       set owner_id = null, added_at = null, added_via = null, nickname = null, location = null, secret_hash = null
@@ -250,7 +250,7 @@ async function remove(t, user, deviceId) {
   if (!r) throw httpError(404, 'This Raspberry Pi is not registered to your account.', 'not-owner');
   await t`insert into nsignage.security_events (event, user_id, device_id) values ('device-removed', ${user.id}, ${deviceId})`;
   console.log('[N-SIGNAGE CLOUD] device removed', JSON.stringify({ user: user.id, deviceId }));
-  return { result: { ok: true }, urls: [...urls, ...legacy.map((x) => x.url)] };
+  return { ok: true };
 }
 
 export default async function handler(req, res) {
@@ -273,7 +273,6 @@ export default async function handler(req, res) {
       await rateLimit(bucket, keyHash(user.id), limit, 600);
     }
 
-    let urls = [];
     const result = await withCustomer(req, async (t, { user }) => {
       if (req.method === 'GET' && action === 'legacy') return legacyList(t, req, user);
       if (req.method === 'GET') return list(t, user);
@@ -285,14 +284,9 @@ export default async function handler(req, res) {
         throw httpError(404, 'Unknown action');
       }
       if (req.method === 'PATCH') return rename(t, req, user, deviceId);
-      if (req.method === 'DELETE') {
-        const r = await remove(t, user, deviceId);
-        urls = r.urls;
-        return r.result;
-      }
+      if (req.method === 'DELETE') return remove(t, user, deviceId);
       throw httpError(405, 'Method not allowed');
     });
-    if (urls.length) await deleteRelayCopies(urls); // after the commit
     send(res, 200, result);
   } catch (err) {
     handleError(res, err);

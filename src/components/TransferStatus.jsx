@@ -7,7 +7,7 @@ import { statusLabel, isActive } from '../utils/transferFormat';
 
 export default function TransferStatus({ state, onCancel, onRetry }) {
   const label = statusLabel(state);
-  const showBar = ['hashing', 'uploading'].includes(state.status) || (state.status === 'waiting-live' && state.received);
+  const showBar = ['hashing', 'uploading'].includes(state.status);
   return (
     <>
       <div className="xfer-head">
@@ -41,6 +41,12 @@ export default function TransferStatus({ state, onCancel, onRetry }) {
               <Info size={12} /> Saved. Checksum not verified (display software update needed)
             </span>
           )}
+          {state.savedAs && <span>as “{state.savedAs}”</span>}
+        </div>
+      )}
+      {state.status === 'success' && state.lan && (
+        <div className="xfer-meta">
+          <span style={{ color: 'var(--success)', display: 'inline-flex', gap: 4, alignItems: 'center' }}><ShieldCheck size={12} /> Sent over your local network; saved size checked</span>
           {state.savedAs && <span>as “{state.savedAs}”</span>}
         </div>
       )}

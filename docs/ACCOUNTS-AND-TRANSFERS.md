@@ -255,9 +255,9 @@ on stderr; keep it with the support ticket.
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` | yes | — | Upstash Redis (set by the Vercel integration) |
-| `BLOB_READ_WRITE_TOKEN` | yes, for cloud uploads | — | Vercel Blob relay store |
+| `BLOB_STORE_ID` (+ Vercel OIDC) or `BLOB_READ_WRITE_TOKEN` | yes, for cloud uploads | — | Vercel Blob relay store; see DEPLOYMENT.md §2a |
 | `CRON_SECRET` | **yes (new)** | — | protects `/api/cron/cleanup`; Vercel sends it automatically |
-| `NSIGNAGE_BLOB_ACCESS` | no | `public` | `private` only with a private store and Pis on agent 2 |
+| `NSIGNAGE_BLOB_ACCESS` | must match the store | `public` | `private` for the live store `nsignage-relay`; needs Pis on agent 2.2 |
 | `NSIGNAGE_MAX_UPLOAD_MB` | no | `500` | per-file limit (agent 1.0 refuses > 500 MB anyway) |
 | `NSIGNAGE_TRANSFER_TTL_HOURS` | no | `48` | when unfinished transfers expire and copies are deleted |
 | `NSIGNAGE_SESSION_DAYS` | no | `30` | login session lifetime (1–90) |

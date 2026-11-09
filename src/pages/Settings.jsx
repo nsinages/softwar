@@ -169,9 +169,9 @@ export default function Settings({ user }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
             {[
               ['Platform', 'N-Signage Digital Signage System'],
-              ['Version', '5.0.0 (Accounts & secure relay transfers)'],
+              ['Version', '6.0.0 (Direct encrypted transfers)'],
               ['Architecture', 'Decentralized Edge Nodes + Central Management Console'],
-              ['Communication Protocol', cloud ? 'Cloud relay over HTTPS (temporary copy, deleted after delivery). Media is stored on the Raspberry Pi.' : 'Direct REST API over LAN / Wi-Fi'],
+              ['Communication Protocol', cloud ? 'Direct to the display, end-to-end encrypted (no cloud copy). Media is stored only on the Raspberry Pi.' : 'Direct REST API over LAN / Wi-Fi'],
               ['Device Storage', cloud ? 'Customer account (cloud) + Raspberry Pi FS' : 'Client-side LocalStorage + Raspberry Pi FS'],
             ].map(([label, value]) => (
               <div

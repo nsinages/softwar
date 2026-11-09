@@ -5,11 +5,11 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { setupEnv, memoryBlob, Client, ORIGIN, deleteFootprint } from './helpers/harness.js';
+import { setupEnv, Client, ORIGIN, deleteFootprint } from './helpers/harness.js';
+import { verifyTicket } from '../api/_lib/tickets.js';
 
-let database; let blob; let db;
+let database; let db; let receiverApi;
 let auth; let devices; let device; let find; let sync; let pairing; let transfer; let cron; let health;
-let blobStore;
 
 // Everything a run creates, so it can be removed again from a real Supabase test project
 const created = { users: new Set(), devices: new Set(), legacyBrowsers: new Set(), usernames: new Set() };
@@ -44,9 +44,7 @@ before(async () => {
   ({ default: transfer } = await import('../api/transfer.js'));
   ({ default: cron } = await import('../api/cron/cleanup.js'));
   ({ default: health } = await import('../api/health.js'));
-  blobStore = await import('../api/_lib/blobStore.js');
-  blob = memoryBlob();
-  blobStore.setBlobBackend(blob.backend);
+  ({ default: receiverApi } = await import('../api/pi/receiver.js'));
 });
 after(async () => {
   if (database.external) await cleanup();
@@ -113,16 +111,41 @@ async function ownerWithPi(name, piExtra = {}) {
   return { owner, pi };
 }
 
-/** Browser part of a transfer: create, "upload" to the relay, commit. */
+// ---- direct upload helpers (the Pi receiver simulated through its website API) ----
+const rawP256 = () => {
+  const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const j = publicKey.export({ format: 'jwk' });
+  return Buffer.concat([Buffer.from([4]), Buffer.from(j.x, 'base64url'), Buffer.from(j.y, 'base64url')]);
+};
+const b64u = (b) => Buffer.from(b).toString('base64url');
+const newEpk = () => { const raw = rawP256(); return { epk: b64u(raw), hash: sha(raw) }; };
+const receiverHost = () => `p-${crypto.randomBytes(8).toString('hex')}.nsinages.in`;
+
+/** The Pi's receiver calling /api/pi/receiver with the device secret. */
+function rcv(pi, action, body = {}, secretOverride) {
+  return pi.call(receiverApi, {
+    method: 'POST', query: { action }, origin: null,
+    headers: { authorization: `Bearer ${secretOverride || pi.secret}` }, body: { deviceId: pi.deviceId, ...body },
+  });
+}
+async function withReceiver(pi, extra = {}) {
+  pi.receiverKey = pi.receiverKey || b64u(rawP256());
+  pi.receiverHost = pi.receiverHost || receiverHost();
+  const r = await rcv(pi, 'heartbeat', { publicKey: pi.receiverKey, hostname: pi.receiverHost, version: '1.0.0', freeBytes: 20 * 1024 ** 3, ...extra });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r;
+}
+
+/** Browser part of a direct transfer: create (gets a ticket); the bytes would go to the Pi, never here. */
 async function sendFile(client, pi, bytes = JPEG, filename = 'promo.jpg') {
+  const k = newEpk();
   const c = await client.call(transfer, {
-    method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename, size: bytes.length, sha256: sha(bytes) },
+    method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename, size: bytes.length, sha256: sha(bytes), epk: k.epk },
   });
   assert.equal(c.status, 200, JSON.stringify(c.body));
-  const url = blob.put(c.body.uploadPathname, bytes);
-  const commit = await client.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: c.body.transfer.id, url } });
-  return { id: c.body.transfer.id, url, commit, uploadPathname: c.body.uploadPathname };
+  return { id: c.body.transfer.id, ticket: c.body.ticket, epk: k, body: c.body };
 }
+const piReports = (pi, id, bytes, extra = {}) => rcv(pi, 'result', { transferId: id, ok: true, savedAs: 'promo.jpg', sha256: sha(bytes), size: bytes.length, ...extra });
 
 const status = (client, id) => client.call(transfer, { query: { action: 'status', id } });
 
@@ -435,196 +458,127 @@ test('re-flashed Pi cannot take over a claimed device id; removal lets it re-reg
 
 // ---- transfers --------------------------------------------------------------------
 
-test('transfer validation: type, size, checksum, ownership', async () => {
+test('direct upload: receiver heartbeat pins its key; tickets bind device, transfer, file, size, checksum and browser key', async () => {
   const { owner, pi } = await ownerWithPi('judy');
-  const mk = (body) => owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, ...body } });
+  assert.equal((await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver.available, false, 'no receiver yet');
+  const noRcv = await owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: 10, sha256: sha('a'), epk: newEpk().epk } });
+  assert.equal(noRcv.status, 409); assert.equal(noRcv.body.reason, 'no-receiver');
+  assert.equal((await rcv(pi, 'heartbeat', { publicKey: b64u(rawP256()) }, 'wrong-secret-'.padEnd(43, 'x'))).status, 401, 'device secret required');
+  assert.equal((await rcv(pi, 'heartbeat', { publicKey: 'not-a-key' })).status, 400);
+  assert.equal((await rcv(pi, 'heartbeat', { publicKey: b64u(rawP256()), hostname: 'evil.example.com' })).status, 400, 'only p-<16 hex>.nsinages.in');
+  const hb = await withReceiver(pi);
+  assert.equal(hb.body.keyStatus, 'pinned');
+  assert.ok(hb.body.ticketKeys.length >= 1 && typeof hb.body.serverTime === 'number');
+  const target = (await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver;
+  assert.equal(target.online, true); assert.equal(target.url, `https://${pi.receiverHost}`); assert.equal(target.publicKey, pi.receiverKey);
+  assert.equal(target.fingerprint, sha(Buffer.from(pi.receiverKey, 'base64url')));
+  const a = await sendFile(owner, pi, MP4, 'clip.mp4');
+  assert.equal(a.body.uploadUrl, `https://${pi.receiverHost}`);
+  assert.equal(a.body.transfer.method, 'direct'); assert.equal(a.body.transfer.state, 'created');
+  const claims = verifyTicket(a.ticket, { keys: hb.body.ticketKeys });
+  assert.deepEqual([claims.aud, claims.tid, claims.name, claims.size, claims.sha256, claims.epk], [pi.deviceId, a.id, 'clip.mp4', MP4.length, sha(MP4), a.epk.hash]);
+  assert.ok(claims.exp - claims.iat <= 900 && claims.chunk === 4 * 1024 * 1024);
+  assert.ok(!JSON.stringify(a.body).match(/blob|vercel-storage|secret/i), 'no storage, no secrets in the reply');
+  for (const old of ['blob-token', 'commit']) {
+    assert.equal((await owner.call(transfer, { method: 'POST', query: { action: old }, body: {} })).status, 404, `${old} is gone`);
+  }
+});
+
+test('transfer validation: type, size, checksum, key, storage, offline, ownership', async () => {
+  const { owner, pi } = await ownerWithPi('ken');
+  await withReceiver(pi, { freeBytes: 300 * 1024 * 1024 });
+  const mk = (body) => owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, epk: newEpk().epk, ...body } });
   assert.equal((await mk({ filename: 'virus.exe', size: 10, sha256: sha('a') })).status, 415);
   assert.equal((await mk({ filename: 'big.mp4', size: 501 * 1024 * 1024, sha256: sha('a') })).status, 413);
   assert.equal((await mk({ filename: 'a.jpg', size: 10, sha256: 'nothex' })).status, 400);
   assert.equal((await mk({ filename: 'a.jpg', size: -5, sha256: sha('a') })).status, 400);
+  assert.equal((await mk({ filename: 'a.jpg', size: 10, sha256: sha('a'), epk: 'short' })).body.reason, 'bad-key');
+  assert.equal((await mk({ filename: 'big.mp4', size: 200 * 1024 * 1024, sha256: sha('a') })).body.reason, 'insufficient-storage');
   const ok = await mk({ filename: '../../etc/pass wd.JPG', size: 10, sha256: sha('a') });
-  assert.equal(ok.status, 200);
-  assert.equal(ok.body.transfer.filename, 'pass wd.jpg', 'directory parts stripped (no path traversal)');
-  assert.ok(ok.body.uploadPathname.startsWith(`transfers/${pi.deviceId}/${ok.body.transfer.id}/`));
-  for (const ext of ['bmp', 'avi', 'mkv', 'webp', 'mov', 'webm']) {
-    assert.equal((await mk({ filename: `clip.${ext}`, size: 10, sha256: sha('a') })).status, 200, ext);
-  }
+  assert.equal(ok.status, 200); assert.equal(ok.body.transfer.filename, 'pass wd.jpg', 'directory parts stripped');
+  await sql((t) => t`update nsignage.device_receivers set last_seen_at = now() - interval '5 minutes' where device_id = ${pi.deviceId}`);
+  const off = await mk({ filename: 'a.jpg', size: 10, sha256: sha('a') });
+  assert.equal(off.status, 409); assert.equal(off.body.reason, 'display-offline');
+  const eve = new Client('eve.k'); await register(eve, 'eve.k');
+  assert.equal((await eve.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: 10, sha256: sha('a'), epk: newEpk().epk } })).status, 404);
+  assert.equal((await eve.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).status, 404);
 });
 
-test('commit checks path, size and real file content; never "completed" before the Pi confirms', async () => {
-  const { owner, pi } = await ownerWithPi('ken');
-  const c = await owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: JPEG.length, sha256: sha(JPEG) } });
-  const id = c.body.transfer.id;
-  const foreign = blob.put(`transfers/${pi.deviceId}/someoneelse/a.jpg`, JPEG);
-  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: id, url: foreign } })).status, 400);
-  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: id, url: 'https://evil.example/a.jpg' } })).status, 400);
-  const short = blob.put(c.body.uploadPathname, JPEG.subarray(0, 100));
-  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: id, url: short } })).status, 422);
-  assert.ok(!blob.blobs.has(short), 'mismatched upload deleted');
-  const fake = Buffer.alloc(JPEG.length, 0x41); // right size, not a JPEG
-  const fakeUrl = blob.put(c.body.uploadPathname, fake);
-  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: id, url: fakeUrl } })).status, 415);
-  const good = blob.put(c.body.uploadPathname, JPEG);
-  const ok = await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: id, url: good } });
-  assert.equal(ok.status, 200);
-  assert.equal(ok.body.transfer.state, 'queued');
-  assert.equal(JSON.stringify(ok.body).includes('blob.vercel-storage.com'), false, 'relay URL never sent to the browser');
-  assert.equal((await status(owner, id)).body.transfer.state, 'queued');
-  const again = await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: id, url: good } });
-  assert.equal(again.status, 409);
-});
-
-test('agent 1.0 flow: Pi receives command, confirms → completed (unverified), relay copy deleted', async () => {
+test('only the Pi completes a transfer: online check, verified result, idempotent, isolated between devices', async () => {
   const { owner, pi } = await ownerWithPi('liam');
-  const { id, url } = await sendFile(owner, pi);
-  const s = await pi.sync();
-  const cmd = s.body.commands.find((x) => x.transferId === id);
-  assert.equal(cmd.type, 'download');
-  assert.equal(cmd.url, url);
-  assert.equal(cmd.sha256, sha(JPEG));
-  assert.equal(cmd.filename, 'promo.jpg');
-  assert.equal((await status(owner, id)).body.transfer.state, 'queued', 'not complete until the Pi says so');
-  pi.results = [{ id: cmd.id, ok: true, filename: 'promo_1.jpg' }]; // agent 1.0 result shape
-  await pi.sync();
-  const t = (await status(owner, id)).body.transfer;
-  assert.equal(t.state, 'completed');
-  assert.equal(t.verified, false);
-  assert.equal(t.verification, 'saved-on-pi-unverified');
-  assert.equal(t.savedAs, 'promo_1.jpg');
-  assert.equal(t.cloudCopy, false);
-  assert.ok(!blob.blobs.has(url), 'relay copy deleted after the Pi confirmed');
-  assert.equal((await pi.sync()).body.commands.length, 0);
-});
-
-test('agent protocol 2: checksum verified; mismatch fails and keeps copy for retry; retry and cancel', async () => {
-  const { owner, pi } = await ownerWithPi('mia', { protocol: 2, capabilities: ['sha256', 'progress'] });
-  const a = await sendFile(owner, pi, MP4, 'clip.mp4');
-  let cmd = (await pi.sync({ progress: [{ transferId: a.id, receivedBytes: 1000 }] })).body.commands[0];
-  assert.equal((await status(owner, a.id)).body.transfer.receivedBytes, 1000);
-  pi.results = [{ id: cmd.id, ok: true, filename: 'clip.mp4', sha256: sha(MP4), size: MP4.length }];
-  await pi.sync();
-  let t = (await status(owner, a.id)).body.transfer;
-  assert.equal(t.state, 'completed'); assert.equal(t.verified, true);
-
-  const b = await sendFile(owner, pi, MP4, 'clip2.mp4');
-  cmd = (await pi.sync()).body.commands[0];
-  pi.results = [{ id: cmd.id, ok: true, filename: 'clip2.mp4', sha256: sha('corrupt') }];
-  await pi.sync();
-  t = (await status(owner, b.id)).body.transfer;
-  assert.equal(t.state, 'failed'); assert.equal(t.reason, 'checksum-mismatch'); assert.equal(t.cloudCopy, true);
-  assert.ok(blob.blobs.has(b.url), 'copy kept for retry');
-  const retry = await owner.call(transfer, { method: 'POST', query: { action: 'retry' }, body: { transferId: b.id } });
-  assert.equal(retry.status, 200); assert.equal(retry.body.needsUpload, false); assert.equal(retry.body.transfer.state, 'queued');
-  const cmd2 = (await pi.sync()).body.commands[0];
-  assert.notEqual(cmd2.id, cmd.id);
-  // a late result for the OLD attempt is ignored
-  pi.results = [{ id: cmd.id, ok: false, error: 'late' }];
-  await pi.sync();
-  assert.equal((await status(owner, b.id)).body.transfer.state, 'queued');
-
-  const cancel = await owner.call(transfer, { method: 'POST', query: { action: 'cancel' }, body: { transferId: b.id } });
-  assert.equal(cancel.body.transfer.state, 'cancelled');
-  assert.ok(!blob.blobs.has(b.url), 'copy deleted on cancel');
-  assert.equal((await pi.sync()).body.commands.length, 0, 'command withdrawn');
-  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'cancel' }, body: { transferId: b.id } })).status, 409);
-});
-
-test('Pi failure (e.g. storage full) → failed with the Pi’s reason; retry after copy loss needs re-upload', async () => {
-  const { owner, pi } = await ownerWithPi('noah', { protocol: 2, capabilities: ['sha256'], storage: { freeBytes: 10 * 1024 * 1024 * 1024, totalBytes: 16e9 } });
+  const { pi: other } = await ownerWithPi('liam.other');
+  await withReceiver(pi); await withReceiver(other);
   const a = await sendFile(owner, pi);
-  const cmd = (await pi.sync()).body.commands[0];
-  pi.results = [{ id: cmd.id, ok: false, error: 'No space left on the SD card', reason: 'insufficient-storage' }];
-  await pi.sync();
+  const check = (who, body) => rcv(who, 'check', { transferId: a.id, size: JPEG.length, sha256: sha(JPEG), epk: a.epk.hash, phase: 'start', ...body });
+  assert.equal((await check(pi)).body.allowed, true);
+  assert.equal((await check(pi, { epk: newEpk().hash })).body.allowed, false, 'a different browser key is refused');
+  assert.equal((await check(pi, { size: 1 })).body.allowed, false);
+  assert.equal((await check(other)).body.reason, 'no-transfer', 'another Pi cannot use this transfer');
+  assert.equal((await status(owner, a.id)).body.transfer.state, 'created', 'not complete until the Pi reports');
+  assert.equal((await piReports(other, a.id, JPEG)).status, 404, 'another Pi cannot complete it');
+  assert.equal((await piReports(pi, a.id, JPEG, { savedAs: 'promo.sh' })).status, 400);
+  await piReports(pi, a.id, JPEG, { sha256: sha('different') });
   let t = (await status(owner, a.id)).body.transfer;
-  assert.equal(t.state, 'failed'); assert.equal(t.reason, 'insufficient-storage'); assert.match(t.error, /space/);
-  blob.blobs.delete(a.url);
-  await sql((t) => t`update nsignage.transfers set blob_url = null where id = ${a.id}`);
-  const retry = await owner.call(transfer, { method: 'POST', query: { action: 'retry' }, body: { transferId: a.id } });
-  assert.equal(retry.body.needsUpload, true); assert.equal(retry.body.transfer.state, 'created');
-  const url = blob.put(retry.body.uploadPathname, JPEG);
-  const commit = await owner.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: a.id, url } });
-  assert.equal(commit.body.transfer.state, 'queued');
-
-  // a Pi reporting too little free space is refused up front
-  const { owner: o2, pi: p2 } = await ownerWithPi('olga', { protocol: 2, storage: { freeBytes: 100 * 1024 * 1024, totalBytes: 8e9 } });
-  const full = await o2.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: p2.deviceId, filename: 'a.mp4', size: 50 * 1024 * 1024, sha256: sha('x') } });
-  assert.equal(full.status, 507);
+  assert.equal(t.state, 'failed'); assert.equal(t.reason, 'checksum-mismatch');
+  const k2 = newEpk();
+  const resumed = await owner.call(transfer, { method: 'POST', query: { action: 'ticket' }, body: { transferId: a.id, epk: k2.epk } });
+  assert.equal(resumed.status, 200); assert.equal(resumed.body.transfer.state, 'created');
+  assert.equal(verifyTicket(resumed.body.ticket).epk, k2.hash, 'resume with a NEW browser key');
+  assert.equal((await check(pi, { epk: k2.hash })).body.allowed, true);
+  assert.equal((await piReports(pi, a.id, JPEG, { savedAs: 'promo_1.jpg' })).body.state, 'completed');
+  t = (await status(owner, a.id)).body.transfer;
+  assert.equal(t.verified, true); assert.equal(t.verification, 'sha256-verified-on-pi'); assert.equal(t.savedAs, 'promo_1.jpg');
+  assert.equal((await piReports(pi, a.id, JPEG, { savedAs: 'promo_9.jpg' })).body.duplicate, true, 'repeated report changes nothing');
+  assert.equal((await status(owner, a.id)).body.transfer.savedAs, 'promo_1.jpg');
+  assert.equal((await check(pi, { epk: k2.hash })).body.allowed, false, 'a completed transfer cannot be written again');
 });
 
-test('expiry + cleanup cron: abandoned transfers expire, relay copies and orphans are deleted', async () => {
-  const { owner, pi } = await ownerWithPi('pat');
+test('cancel, expiry and device removal stop the Pi at its next check', async () => {
+  const { owner, pi } = await ownerWithPi('mia');
+  await withReceiver(pi);
+  const check = (x) => rcv(pi, 'check', { transferId: x.id, size: JPEG.length, sha256: sha(JPEG), epk: x.epk.hash, phase: 'finish' });
   const a = await sendFile(owner, pi);
-  const orphan = blob.put(`transfers/${pi.deviceId}/AAAAAAAAAAAAAAAAAAAAAA/x.jpg`, JPEG, { uploadedAt: Date.now() - 5 * 3600 * 1000 });
-  assert.equal((await new Client('x').call(cron)).status, 401);
-  assert.equal((await new Client('x').call(cron, { headers: { authorization: 'Bearer wrong' } })).status, 401);
-  await sql((t) => t`update nsignage.transfers set expires_at = now() - interval '1 second' where id = ${a.id}`);
+  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'cancel' }, body: { transferId: a.id } })).body.transfer.state, 'cancelled');
+  assert.equal((await check(a)).body.reason, 'cancelled');
+  const b = await sendFile(owner, pi);
+  await sql((t) => t`update nsignage.transfers set expires_at = now() - interval '1 second' where id = ${b.id}`);
+  assert.equal((await check(b)).body.reason, 'expired');
   const run = await new Client('cron').call(cron, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } });
-  assert.equal(run.status, 200, JSON.stringify(run.body));
-  assert.ok(run.body.expired >= 1);
-  assert.equal((await status(owner, a.id)).body.transfer.state, 'expired');
-  assert.ok(!blob.blobs.has(a.url));
-  assert.ok(!blob.blobs.has(orphan), 'orphan copy swept');
-  assert.equal((await pi.sync()).body.commands.length, 0);
-});
-
-test('removing a device cancels its transfers and deletes copies; files on the Pi untouched (no delete command)', async () => {
-  const { owner, pi } = await ownerWithPi('quinn');
-  const a = await sendFile(owner, pi);
+  assert.equal(run.status, 200); assert.ok(run.body.expired >= 1); assert.equal(run.body.copiesDeleted, undefined, 'no media copies exist to clean up');
+  assert.equal((await status(owner, b.id)).body.transfer.state, 'expired');
+  const c = await sendFile(owner, pi);
   assert.equal((await owner.call(devices, { method: 'DELETE', query: { deviceId: pi.deviceId } })).status, 200);
-  assert.ok(!blob.blobs.has(a.url));
-  assert.equal((await status(owner, a.id)).body.transfer.state, 'cancelled');
-  assert.equal((await pi.sync()).body.commands.filter((c) => c.type === 'delete').length, 0);
+  assert.equal((await status(owner, c.id)).body.transfer.state, 'cancelled');
+  const [r] = await sql((t) => t`select count(*)::int as n from nsignage.device_receivers where device_id = ${pi.deviceId}`);
+  assert.equal(r.n, 0, 'a new owner pins the receiver key afresh');
 });
 
-test('private relay mode needs Pi support; presigned URL delivered per sync', async () => {
-  process.env.NSIGNAGE_BLOB_ACCESS = 'private';
-  try {
-    const { owner, pi } = await ownerWithPi('rita');
-    const r = await owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: JPEG.length, sha256: sha(JPEG) } });
-    assert.equal(r.status, 409); assert.equal(r.body.reason, 'agent-update-required');
-    const { owner: o2, pi: p2 } = await ownerWithPi('sam', { protocol: 2, capabilities: ['sha256', 'private-blob'] });
-    const c = await o2.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: p2.deviceId, filename: 'a.jpg', size: JPEG.length, sha256: sha(JPEG) } });
-    const url = blob.put(c.body.uploadPathname, JPEG, { access: 'private' });
-    const commit = await o2.call(transfer, { method: 'POST', query: { action: 'commit' }, body: { transferId: c.body.transfer.id, url } });
-    assert.equal(commit.status, 200, JSON.stringify(commit.body));
-    const cmd = (await p2.sync()).body.commands[0];
-    assert.match(cmd.url, /\.private\.blob\.vercel-storage\.com\/.*\?sig=/);
-  } finally {
-    delete process.env.NSIGNAGE_BLOB_ACCESS;
-  }
+test('a changed receiver key is not used until the owner confirms its fingerprint; only the owner can', async () => {
+  const { owner, pi } = await ownerWithPi('nina');
+  await withReceiver(pi);
+  const newKey = b64u(rawP256());
+  assert.equal((await rcv(pi, 'heartbeat', { publicKey: newKey, hostname: pi.receiverHost })).body.keyStatus, 'pending');
+  const target = (await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver;
+  assert.equal(target.publicKey, pi.receiverKey, 'the pinned key is still the one served');
+  assert.equal(target.keyChangePending, true);
+  const blocked = await owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: 10, sha256: sha('a'), epk: newEpk().epk } });
+  assert.equal(blocked.body.reason, 'key-change-pending');
+  const eve = new Client('eve.n'); await register(eve, 'eve.n');
+  assert.equal((await eve.call(transfer, { method: 'POST', query: { action: 'confirm-key' }, body: { deviceId: pi.deviceId, fingerprint: target.pendingFingerprint } })).status, 404);
+  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'confirm-key' }, body: { deviceId: pi.deviceId, fingerprint: 'f'.repeat(64) } })).status, 409);
+  assert.equal((await owner.call(transfer, { method: 'POST', query: { action: 'confirm-key' }, body: { deviceId: pi.deviceId, fingerprint: target.pendingFingerprint } })).status, 200);
+  assert.equal((await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver.publicKey, newKey);
 });
 
-test('Blob client-upload token is only issued for the exact transfer path, size and type', async () => {
-  const { owner, pi } = await ownerWithPi('tom');
-  const c = await owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: JPEG.length, sha256: sha(JPEG) } });
-  const token = (pathname, transferId = c.body.transfer.id, who = owner) => who.call(transfer, {
-    method: 'POST', query: { action: 'blob-token' },
-    body: { type: 'blob.generate-client-token', payload: { pathname, multipart: false, clientPayload: JSON.stringify({ transferId }) } },
-  });
-  const ok = await token(c.body.uploadPathname);
-  assert.equal(ok.status, 200, JSON.stringify(ok.body));
-  assert.ok(ok.body.clientToken.startsWith('vercel_blob_client_'));
-  // vercel_blob_client_<store>_<base64("<hmac>.<base64 json payload>")>
-  const inner = Buffer.from(ok.body.clientToken.split('_').pop(), 'base64').toString();
-  const decoded = JSON.parse(Buffer.from(inner.split('.')[1], 'base64').toString());
-  assert.equal(decoded.maximumSizeInBytes, JPEG.length);
-  assert.deepEqual(decoded.allowedContentTypes, ['image/jpeg']);
-  assert.equal(decoded.pathname, c.body.uploadPathname);
-  assert.notEqual((await token(`transfers/${pi.deviceId}/other/a.jpg`)).status, 200);
-  const eve = new Client('eve'); await register(eve, 'eve');
-  assert.notEqual((await token(c.body.uploadPathname, c.body.transfer.id, eve)).status, 200, 'other account');
-});
-
-test('transfer list and views never expose relay URLs or owner ids', async () => {
+test('transfer list and views carry metadata only (no URLs, tickets, keys or owner ids)', async () => {
   const { owner, pi } = await ownerWithPi('uma');
+  await withReceiver(pi);
   await sendFile(owner, pi);
   const l = await owner.call(transfer, { query: { action: 'list' } });
   assert.equal(l.status, 200);
-  assert.ok(l.body.transfers.length >= 1);
   const text = JSON.stringify(l.body);
-  assert.ok(!text.includes('vercel-storage.com'));
-  assert.ok(!text.includes('userId'));
-  assert.equal(l.body.transfers[0].relay, 'cloud');
+  for (const bad of ['nsinages.in', 'nst1.', 'userId', pi.receiverKey, 'blob']) assert.ok(!text.includes(bad), bad);
+  assert.equal(l.body.transfers[0].method, 'direct');
 });
 
 // ---- Add Device by name + IP, persistence, next-login restoration ----------------
@@ -764,7 +718,9 @@ test('suspended accounts cannot log in; registration can be closed (staff-create
 test('health reports configuration flags only', async () => {
   const h = await new Client('h').call(health);
   assert.equal(h.status, 200, JSON.stringify(h.body));
-  assert.deepEqual(h.body.blob, { configured: true, access: 'public' });
+  assert.equal(h.body.blob, undefined, 'no media storage is configured or used');
+  assert.equal(h.body.upload.mode, 'direct-e2e'); assert.equal(h.body.upload.ticketKey, true);
+  assert.equal(h.body.upload.mediaStoredOnWebsite, false); assert.match(h.body.upload.keyId, /^[0-9a-f]{16}$/);
   const d = h.body.database;
   assert.equal(d.provider, 'supabase-postgres');
   assert.equal(d.reachable, true);
@@ -785,6 +741,84 @@ test('every query runs as nsignage_api under RLS, even with a more privileged co
   assert.equal(r.visible_users, 0, 'no RLS context → no rows');
   const [cu] = await db.asUser(crypto.randomUUID(), (t) => t`select count(*)::int as n from nsignage.devices`);
   assert.equal(cu.n, 0, 'an unknown customer sees no devices');
+});
+
+// ---- Add Device → Pi Name → Find IP (hosted path) ---------------------------------
+
+test('Find IP matches the Pi Name against username or hostname, never the nickname; clear not-found answer', async () => {
+  const ip = '198.51.100.230';
+  const owner = new Client('findname', ip); await register(owner, 'find.name.owner');
+  const pi = new Pi(ip, { hostname: 'ns001' });
+  await pi.sync();
+  const find1 = (identifier) => owner.call(find, { query: { identifier } });
+  const byHost = (await find1('ns001')).body;
+  assert.equal(byHost.found, true); assert.equal(byHost.devices[0].matchedBy, 'hostname');
+  assert.equal(byHost.devices[0].ip, '192.168.1.50', 'IP as reported by the Pi');
+  assert.equal((await find1('NS001.local')).body.devices[0].matchedBy, 'hostname');
+  assert.equal((await find1('nsignage')).body.devices[0].matchedBy, 'username');
+  const miss = (await find1('lobby')).body;
+  assert.equal(miss.found, false); assert.equal(miss.reason, 'not-found'); assert.ok(miss.otherCount >= 1);
+  assert.equal((await find1('a b')).status, 400);
+  // claim with a nickname: the nickname is the display name, the identity stays the Pi's
+  const claimed = await owner.call(devices, { method: 'POST', body: { claimNonce: byHost.devices[0].claimNonce, name: 'Lobby' } });
+  assert.equal(claimed.status, 200);
+  assert.equal(claimed.body.device.name, 'Lobby');
+  assert.equal(claimed.body.device.deviceId, pi.deviceId);
+  assert.equal(claimed.body.device.hostname, 'ns001');
+});
+
+test('a Wi-Fi change needs no new registration: same device id + secret, new network and IP, transfers still delivered', async () => {
+  const { owner, pi } = await ownerWithPi('wifi.move', { protocol: 2, capabilities: ['sha256'] });
+  pi.ip = '203.0.113.200';                         // the Pi now reaches the internet through another router
+  assert.equal((await pi.sync({ localIp: '10.0.0.42' })).status, 200);
+  const list = (await owner.call(devices)).body.devices;
+  assert.equal(list.length, 1);
+  assert.equal(list[0].ip, '10.0.0.42'); assert.equal(list[0].online, true); assert.equal(list[0].name, 'Shop Display');
+  await withReceiver(pi);                             // the receiver also follows the Pi to the new network
+  const a = await sendFile(owner, pi);
+  await piReports(pi, a.id, JPEG);
+  assert.equal((await status(owner, a.id)).body.transfer.state, 'completed');
+  // a different secret for the same device id is still refused (identity cannot be taken over)
+  const thief = new Pi(pi.ip); thief.deviceId = pi.deviceId;
+  assert.equal((await thief.sync()).status, 401);
+});
+
+test('manually saved records stay "saved" (never falsely verified) when a Pi is added with Find IP', async () => {
+  const ip = '198.51.100.231';
+  const c = new Client('saved.keep', ip); await register(c, 'saved.keep.owner');
+  const saved = await save(c, { name: 'Old Lobby Screen', ip: '192.168.1.77', hostname: 'ns009' });
+  assert.equal(saved.body.verified, false);
+  const pi = new Pi(ip, { hostname: 'ns002' });
+  await pi.sync();
+  const found = (await c.call(find, { query: { identifier: 'ns002' } })).body.devices[0];
+  assert.equal((await c.call(devices, { method: 'POST', body: { claimNonce: found.claimNonce } })).status, 200);
+  const list = (await c.call(devices)).body.devices;
+  const old = list.find((d) => d.name === 'Old Lobby Screen');
+  assert.equal(old.registration, 'saved'); assert.equal(old.status, 'unknown'); assert.equal(old.online, false);
+  assert.equal(list.find((d) => d.deviceId === pi.deviceId).registration, 'verified');
+});
+
+test('Enter IP manually (hosted): the IP only narrows the search; the Pi must check in from this network with that IP and name', async () => {
+  const ip = '198.51.100.232';
+  const c = new Client('manual.ip', ip); await register(c, 'manual.ip.owner');
+  const pi = new Pi(ip, { hostname: 'ns003', localIp: '192.168.1.73' });
+  await pi.sync();
+  const find1 = (query) => c.call(find, { query });
+  const hit = (await find1({ identifier: 'ns003', ip: '192.168.1.73' })).body;
+  assert.equal(hit.found, true); assert.equal(hit.devices[0].ip, '192.168.1.73'); assert.ok(hit.devices[0].claimNonce);
+  const wrongIp = (await find1({ identifier: 'ns003', ip: '192.168.1.74' })).body;
+  assert.equal(wrongIp.found, false); assert.equal(wrongIp.reason, 'not-found');
+  assert.equal((await find1({ identifier: 'ns999', ip: '192.168.1.73' })).body.found, false, 'IP alone does not match a different name');
+  assert.equal((await find1({ identifier: 'ns003', ip: '192.168.1.300' })).status, 400);
+  // the same IP typed from another network finds nothing (no proof of being on the Pi's Wi-Fi)
+  const away = new Client('manual.ip.away', '203.0.113.99'); await register(away, 'manual.ip.away');
+  assert.equal((await away.call(find, { query: { identifier: 'ns003', ip: '192.168.1.73' } })).body.found, false);
+  // Connect = the usual single-use, network-bound claim
+  const claimed = await c.call(devices, { method: 'POST', body: { claimNonce: hit.devices[0].claimNonce, name: 'Manual Screen' } });
+  assert.equal(claimed.status, 200); assert.equal(claimed.body.device.registration, 'verified');
+  // no Pi answering: "Save without connecting" keeps it saved, never verified
+  const saved = await save(away, { name: 'Unreachable Screen', ip: '192.168.1.73', hostname: 'ns003' });
+  assert.equal(saved.status, 200); assert.equal(saved.body.verified, false); assert.equal(saved.body.device.registration, 'saved');
 });
 
 export { ORIGIN };

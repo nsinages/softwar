@@ -21,7 +21,7 @@ import {
 } from '../_lib/cloud.js';
 import { withContext, setContext, ms } from '../_lib/db.js';
 import {
-  applyCommandResults, applyTransferProgress, pendingCommandsForPi, deleteRelayCopies,
+  applyCommandResults, pendingCommandsForPi,
 } from '../_lib/transfers.js';
 
 export default async function handler(req, res) {
@@ -37,7 +37,6 @@ export default async function handler(req, res) {
     const mediaJson = JSON.stringify(report.media);
     const mediaHash = sha256(mediaJson);
 
-    let deleteUrls = [];
     let registered = false;
     const commands = await withContext('none', {}, async (t) => {
       // ---- authenticate or register (system context) ----
@@ -94,11 +93,10 @@ export default async function handler(req, res) {
           on conflict (device_id, net_key) do update set seen_at = now()
           where nsignage.device_network_sightings.seen_at < now() - interval '30 seconds'`;
       }
-      deleteUrls = await applyCommandResults(t, deviceId, results);
-      await applyTransferProgress(t, deviceId, body.progress);
+      // Media is sent directly to the Pi's upload receiver (api/pi/receiver.js); sync only carries delete commands
+      await applyCommandResults(t, deviceId, results);
       return pendingCommandsForPi(t, deviceId);
     });
-    await deleteRelayCopies(deleteUrls); // the Pi confirmed: remove relay copies after the commit
 
     send(res, 200, {
       ok: true,

@@ -1,5 +1,5 @@
 // =============================================
-// N Signage — Recent relay transfers of this account (hosted website)
+// N Signage — Recent transfers of this account (hosted website): metadata only
 // Shows the real state reported by the cloud: nothing is "done" until the
 // display confirmed it saved the file.
 // =============================================
@@ -12,6 +12,7 @@ import { formatBytes } from '../utils/transferFormat';
 const BADGE = {
   created: ['badge-neutral', 'Upload not finished'],
   queued: ['badge-warning', 'Waiting for display'],
+  downloading: ['badge-info', 'Display downloading'],
   completed: ['badge-success', 'Saved on display'],
   failed: ['badge-danger', 'Failed'],
   cancelled: ['badge-neutral', 'Cancelled'],
@@ -72,7 +73,7 @@ export default function RecentTransfers({ file, refreshKey }) {
       {notice && <div className="alert alert-warning" style={{ fontSize: 'var(--text-xs)', marginBottom: 8 }}>{notice}</div>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
         {items.slice(0, 15).map((t) => {
-          const [cls, label] = BADGE[t.state] || ['badge-neutral', t.state];
+          const [cls, label] = BADGE[t.stage === 'downloading' ? 'downloading' : t.state] || ['badge-neutral', t.state];
           return (
             <div key={t.id} className="xfer-row" style={{ padding: '8px 10px' }}>
               <div className="xfer-head">
@@ -84,7 +85,6 @@ export default function RecentTransfers({ file, refreshKey }) {
                 <span>{formatBytes(t.size)}</span>
                 <span>{new Date(t.createdAt).toLocaleString()}</span>
                 {t.state === 'completed' && <span>{t.verified ? 'checksum verified' : 'not checksum-verified'}</span>}
-                {t.state === 'queued' && Number.isFinite(t.receivedBytes) && <span>display received {Math.round((t.receivedBytes / t.size) * 100)}%</span>}
               </div>
               {t.error && t.state !== 'completed' && <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t.error}</div>}
               {(!FINAL_STATES.includes(t.state) || t.state === 'failed') && (
@@ -104,8 +104,8 @@ export default function RecentTransfers({ file, refreshKey }) {
         })}
       </div>
       <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.4 }}>
-        Files pass through the N-Signage relay and are deleted from it once the display has saved them
-        (or when a transfer is cancelled or expires).
+        Files go straight from your browser to the display, encrypted. The N-Signage website keeps only
+        the file name, size and checksum, never the file itself.
       </p>
     </div>
   );

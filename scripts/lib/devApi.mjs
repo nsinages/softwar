@@ -8,10 +8,11 @@
 // =============================================
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { devClientIp } from './devClientIp.mjs';
 
 export { loadEnvFile } from './env.mjs';
 
-const ROUTES = ['auth', 'devices', 'device', 'find', 'transfer', 'health', 'pi/sync', 'pi/pairing', 'cron/cleanup'];
+const ROUTES = ['auth', 'devices', 'device', 'find', 'transfer', 'health', 'pi/sync', 'pi/pairing', 'pi/receiver', 'cron/cleanup'];
 
 /** Connect-style middleware: /api/<route> → api/<route>.js default export. */
 export function apiMiddleware(root) {
@@ -38,7 +39,8 @@ export function apiMiddleware(root) {
         req.query = Object.fromEntries(u.searchParams);
         const ct = String(req.headers['content-type'] || '');
         req.body = ct.includes('json') && raw.length ? JSON.parse(raw.toString()) : raw.toString();
-        req.headers['x-real-ip'] = req.socket.remoteAddress || '127.0.0.1'; // never trust a client-sent header
+        // never trust a client-sent header; a browser on this PC/LAN counts as this PC's public IP (as on Vercel)
+        req.headers['x-real-ip'] = await devClientIp(req.socket.remoteAddress);
         await (await load(name))(req, res);
       } catch (err) {
         console.error('[dev api]', err.message);

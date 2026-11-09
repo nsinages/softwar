@@ -19,7 +19,7 @@ The dashboard server **must run on a machine on the same network as the Pis**
 (browsers cannot reach LAN devices across origins or do discovery themselves).
 Device list and settings are stored in each browser's `localStorage`.
 
-## Hosted website (cloud relay) — software.nsinages.in
+## Hosted website — software.nsinages.in
 
 A website hosted on the internet (Vercel) can never connect to a Pi on a
 customer's Wi-Fi, and browsers cannot do UDP/mDNS discovery. When the site is
@@ -32,12 +32,12 @@ Pi (cloud_agent.py) ──every 2–5 s──►  POST /api/pi/sync   ◄── 
 Browser ──► /api/auth      username + password accounts (no email), recovery keys
         ──► /api/devices   Add Device: same Wi-Fi (Find Pi) or pairing code; rename / remove
         ──► /api/find      Pis on the SAME network as the browser
-        ──► /api/transfer  relay transfers: checksum, cancel/retry, copy deleted after the Pi confirms
+        ──► /api/transfer  upload tickets + metadata; the file goes encrypted straight to the Pi
         ──► /api/device    status, media list, delete
 ```
 
-Media goes browser → cloud relay (temporary copy) → Pi. It is a relay, not
-peer-to-peer, and it is stored only on the Pi.
+Media goes from the browser, end-to-end encrypted, directly to the Pi's upload
+receiver (Cloudflare Tunnel). The website never stores it: see [docs/DIRECT-UPLOAD.md](docs/DIRECT-UPLOAD.md).
 
 - **Deploying to software.nsinages.in and rolling back:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - **Database (Supabase PostgreSQL), setup, env vars, migration:**
@@ -53,7 +53,7 @@ Quick version:
 
 1. Create a Supabase project (the live one is in Singapore) and run `npm run db:setup` (see
    docs/SUPABASE-SETUP.md); in Vercel set `DATABASE_URL`, `CRON_SECRET` and
-   connect a **public Blob** store (temporary media relay only); redeploy.
+   set `NSIGNAGE_TICKET_KEY` (`npm run upload:keygen`); redeploy. Direct uploads: [docs/DIRECT-UPLOAD.md](docs/DIRECT-UPLOAD.md).
    `curl https://software.nsinages.in/api/health` → `"ok":true`.
 2. On each Pi, in the N-Signage folder: `sudo ./install-cloud-agent.sh`
    (detects the Linux user and folder; `--uninstall` to roll back).
