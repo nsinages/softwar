@@ -463,7 +463,11 @@ test('direct upload: receiver heartbeat pins its key; tickets bind device, trans
   assert.equal((await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver.available, false, 'no receiver yet');
   const noRcv = await owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: 10, sha256: sha('a'), epk: newEpk().epk } });
   assert.equal(noRcv.status, 409); assert.equal(noRcv.body.reason, 'no-receiver');
+  const noRcvTarget = (await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver;
+  assert.equal(noRcvTarget.status, 'no-receiver'); assert.match(noRcvTarget.message, /not installed/);
   assert.equal((await rcv(pi, 'heartbeat', { publicKey: b64u(rawP256()) }, 'wrong-secret-'.padEnd(43, 'x'))).status, 401, 'device secret required');
+  const authFail = (await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver;
+  assert.equal(authFail.status, 'receiver-auth-failed', 'installed but refused is not reported as "not installed"');
   assert.equal((await rcv(pi, 'heartbeat', { publicKey: 'not-a-key' })).status, 400);
   assert.equal((await rcv(pi, 'heartbeat', { publicKey: b64u(rawP256()), hostname: 'evil.example.com' })).status, 400, 'only p-<16 hex>.nsinages.in');
   const hb = await withReceiver(pi);
@@ -471,6 +475,7 @@ test('direct upload: receiver heartbeat pins its key; tickets bind device, trans
   assert.ok(hb.body.ticketKeys.length >= 1 && typeof hb.body.serverTime === 'number');
   const target = (await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver;
   assert.equal(target.online, true); assert.equal(target.url, `https://${pi.receiverHost}`); assert.equal(target.publicKey, pi.receiverKey);
+  assert.equal(target.status, 'ready');
   assert.equal(target.fingerprint, sha(Buffer.from(pi.receiverKey, 'base64url')));
   const a = await sendFile(owner, pi, MP4, 'clip.mp4');
   assert.equal(a.body.uploadUrl, `https://${pi.receiverHost}`);
@@ -498,10 +503,46 @@ test('transfer validation: type, size, checksum, key, storage, offline, ownershi
   assert.equal(ok.status, 200); assert.equal(ok.body.transfer.filename, 'pass wd.jpg', 'directory parts stripped');
   await sql((t) => t`update nsignage.device_receivers set last_seen_at = now() - interval '5 minutes' where device_id = ${pi.deviceId}`);
   const off = await mk({ filename: 'a.jpg', size: 10, sha256: sha('a') });
-  assert.equal(off.status, 409); assert.equal(off.body.reason, 'display-offline');
+  assert.equal(off.status, 409); assert.equal(off.body.reason, 'receiver-offline', 'the Pi checks in, only its upload service is silent');
   const eve = new Client('eve.k'); await register(eve, 'eve.k');
   assert.equal((await eve.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: 10, sha256: sha('a'), epk: newEpk().epk } })).status, 404);
   assert.equal((await eve.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).status, 404);
+});
+
+test('receiver status: each failure is named precisely (offline, tunnel, agent down but receiver up, auth)', async () => {
+  const { owner, pi } = await ownerWithPi('kim');
+  const target = async () => (await owner.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } })).body.receiver;
+  const mk = () => owner.call(transfer, { method: 'POST', query: { action: 'create' }, body: { deviceId: pi.deviceId, filename: 'a.jpg', size: 10, sha256: sha('a'), epk: newEpk().epk } });
+  // receiver running but no tunnel hostname configured
+  pi.receiverKey = b64u(rawP256());
+  assert.equal((await rcv(pi, 'heartbeat', { publicKey: pi.receiverKey, version: '1.1.0' })).status, 200);
+  assert.equal((await target()).status, 'tunnel-not-configured');
+  assert.equal((await mk()).body.reason, 'tunnel-not-configured');
+  // ready
+  await withReceiver(pi);
+  assert.equal((await target()).status, 'ready');
+  // agent (V2.1) silent but the receiver reports: the receiver can still take the file
+  await sql((t) => t`update nsignage.devices set last_seen_at = now() - interval '1 hour' where id = ${pi.deviceId}`);
+  assert.equal((await target()).status, 'ready');
+  assert.equal((await mk()).status, 200);
+  // both silent: the whole display is offline
+  await sql((t) => t`update nsignage.device_receivers set last_seen_at = now() - interval '1 hour' where device_id = ${pi.deviceId}`);
+  const off = await target();
+  assert.equal(off.status, 'display-offline'); assert.match(off.message, /last report \d+ min ago/);
+  assert.equal((await mk()).body.reason, 'display-offline');
+  // agent back, receiver still silent
+  assert.equal((await pi.sync()).status, 200);
+  assert.equal((await target()).status, 'receiver-offline');
+  // receiver comes back with a wrong secret: authentication failure, not "offline"
+  assert.equal((await rcv(pi, 'heartbeat', { publicKey: pi.receiverKey }, 'wrong-secret-'.padEnd(43, 'y'))).status, 401);
+  assert.equal((await target()).status, 'receiver-auth-failed');
+  // the next good heartbeat clears it
+  await withReceiver(pi);
+  assert.equal((await target()).status, 'ready');
+  // another customer learns nothing
+  const eve = new Client('eve.kim'); await register(eve, 'eve.kim');
+  const other = await eve.call(transfer, { query: { action: 'target', deviceId: pi.deviceId } });
+  assert.equal(other.status, 404); assert.ok(!JSON.stringify(other.body).includes('receiver'));
 });
 
 test('only the Pi completes a transfer: online check, verified result, idempotent, isolated between devices', async () => {

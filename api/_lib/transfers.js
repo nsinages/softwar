@@ -151,14 +151,57 @@ export function receiverFromRow(r) {
   };
 }
 
-export const receiverOnline = (rc, now = Date.now()) => Boolean(rc?.lastSeen && now - rc.lastSeen < RECEIVER_ONLINE_MS && rc.hostname);
+const receiverFresh = (rc, now = Date.now()) => Boolean(rc?.lastSeen && now - rc.lastSeen < RECEIVER_ONLINE_MS);
+export const receiverOnline = (rc, now = Date.now()) => receiverFresh(rc, now) && Boolean(rc.hostname);
+
+/** How recently a receiver's device credentials were refused (security_events), within this window. */
+export const RECEIVER_AUTH_FAIL_WINDOW_MS = 15 * 60_000;
+
+const minutesAgo = (t, now) => Math.max(1, Math.round((now - t) / 60_000));
+
+/**
+ * Why a display can or cannot take a direct upload right now, decided only from what the
+ * website knows (the receiver's own authenticated heartbeats, the agent's check-ins and
+ * refused receiver logins). Whether the tunnel actually carries traffic is checked by the
+ * browser itself against https://<hostname>/v1/health (src/api/transferApi.js).
+ *   → { status, message }   status: ready | upload-not-configured | no-receiver | receiver-auth-failed
+ *                                    | key-change-pending | receiver-offline | display-offline | tunnel-not-configured
+ */
+export function receiverStatus(device, rc, { now = Date.now(), authFailedAt = null, ticketsReady = true } = {}) {
+  const s = (status, message) => ({ status, message });
+  if (!ticketsReady) return s('upload-not-configured', 'Sending files is not available right now (upload signing is not configured on the server).');
+  const authFailed = authFailedAt && now - authFailedAt < RECEIVER_AUTH_FAIL_WINDOW_MS && (!rc || !rc.lastSeen || authFailedAt > rc.lastSeen);
+  if (!rc) {
+    if (authFailed) {
+      return s('receiver-auth-failed', 'The secure upload service on this display is installed, but the website rejected its device credentials (authentication failed). Check that the N-Signage agent on the display is connected, then restart the upload service.');
+    }
+    return s('no-receiver', 'Receiver service is not installed: this display\'s secure upload service has never contacted the website, so files cannot be sent to it from the website yet.');
+  }
+  if (rc.pendingPublicKey) return s('key-change-pending', 'This display reported a new security key. Confirm it on the Devices page before sending files.');
+  if (!receiverFresh(rc, now)) {
+    const ago = rc.lastSeen ? ` (last report ${minutesAgo(rc.lastSeen, now)} min ago)` : '';
+    if (authFailed) {
+      return s('receiver-auth-failed', `The display's secure upload service is running, but the website rejects its device credentials (authentication failed)${ago}. Check that the N-Signage agent on the display is connected, then restart the upload service.`);
+    }
+    if (isOnline(device, now)) {
+      return s('receiver-offline', `Receiver is offline: the display is online, but its secure upload service is not reporting${ago}. The service may be stopped. Nothing was uploaded.`);
+    }
+    return s('display-offline', `The display is offline${ago}, so the file cannot be sent now. Nothing was uploaded. Try again when the display is online.`);
+  }
+  if (!rc.hostname) return s('tunnel-not-configured', 'Cloudflare Tunnel is not configured for this display: its upload service has no public upload address.');
+  return s('ready', 'Ready to receive files.');
+}
 
 /** What the browser needs to encrypt for and reach the Pi (public data only). */
-export function receiverView(rc, device, now = Date.now()) {
-  if (!rc) return { available: false, online: false, reason: 'no-receiver' };
+export function receiverView(rc, device, now = Date.now(), opts = {}) {
+  const { status, message } = receiverStatus(device, rc, { now, ...opts });
+  if (!rc) return { available: false, online: false, reason: status, status, message };
   return {
     available: true,
-    online: isOnline(device, now) && receiverOnline(rc, now),
+    online: receiverOnline(rc, now),
+    status,
+    message,
+    lastSeen: rc.lastSeen,
     url: rc.hostname ? `https://${rc.hostname}` : null,
     publicKey: rc.publicKey,
     fingerprint: rc.fingerprint,
@@ -221,19 +264,33 @@ export async function confirmReceiverKey(t, deviceId, fingerprint) {
 
 // ---- Create + tickets ------------------------------------------------------------
 
-export function requireReceiverReady(device, rc) {
-  if (!rc) {
-    throw httpError(409, 'This display cannot receive files from the website yet: its secure upload service is not installed.', 'no-receiver');
-  }
-  if (rc.pendingPublicKey) {
-    throw httpError(409, 'This display reported a new security key. Confirm it on the Devices page before sending files.', 'key-change-pending');
-  }
-  if (!isOnline(device) || !receiverOnline(rc)) {
-    throw httpError(409, 'The display is offline, so the file cannot be sent now. Nothing was uploaded. Try again when the display is online.', 'display-offline');
-  }
+/**
+ * Refuse (409, with a specific reason) unless the receiver is ready. The receiver's own
+ * heartbeat is what proves it can take a file: the V2.1 agent being briefly offline does
+ * not block an upload the receiver can accept.
+ */
+export function requireReceiverReady(device, rc, opts = {}) {
+  const { status, message } = receiverStatus(device, rc, opts);
+  if (status !== 'ready') throw httpError(status === 'upload-not-configured' ? 503 : 409, message, status);
 }
 
-export async function createDirectTransfer(t, user, device, rc, body) {
+/** Last refused receiver login for this Pi, or null (RLS 'system' context; caller already knows the device id). */
+export async function receiverAuthFailedAt(t, deviceId) {
+  const [r] = await t`select max(at) as at from nsignage.security_events
+                      where event = 'receiver-auth-failed' and device_id = ${deviceId}
+                        and at > now() - make_interval(secs => ${RECEIVER_AUTH_FAIL_WINDOW_MS / 1000})`;
+  return r?.at ? ms(r.at) : null;
+}
+
+/** Note a refused receiver login, at most once per 10 minutes per device (RLS 'system' context). */
+export async function noteReceiverAuthFailure(t, deviceId, reason) {
+  await t`insert into nsignage.security_events (event, device_id, detail)
+          select 'receiver-auth-failed', ${deviceId}, ${t.json({ reason })}
+          where not exists (select 1 from nsignage.security_events
+                            where event = 'receiver-auth-failed' and device_id = ${deviceId} and at > now() - interval '10 minutes')`;
+}
+
+export async function createDirectTransfer(t, user, device, rc, body, opts = {}) {
   const original = String(body.filename || '');
   const type = mediaTypeOf(original);
   if (!type) throw httpError(415, 'Unsupported file type.', 'unsupported-type');
@@ -246,7 +303,7 @@ export async function createDirectTransfer(t, user, device, rc, body) {
   const sha256 = String(body.sha256 || '').toLowerCase();
   if (!SHA256_RX.test(sha256)) throw httpError(400, 'Missing or invalid SHA-256 checksum', 'bad-checksum');
   const hash = epkHash(body.epk);
-  requireReceiverReady(device, rc);
+  requireReceiverReady(device, rc, opts);
   const free = Math.min(rc.freeBytes ?? Infinity, device.storage?.freeBytes ?? Infinity);
   if (Number.isFinite(free) && size > free - STORAGE_MARGIN) {
     throw httpError(507, `Not enough free space on the display (${Math.max(0, Math.floor(free / MiB))} MB free).`, 'insufficient-storage');
@@ -283,11 +340,11 @@ export function ticketFor(tr, hash) {
  * New ticket for an unfinished transfer (expired ticket, retry, or a resume
  * after a page reload with a NEW browser key). Ownership was checked by the caller.
  */
-export async function renewTicket(t, tr, device, rc, epk) {
+export async function renewTicket(t, tr, device, rc, epk, opts = {}) {
   if (!['created', 'failed'].includes(tr.state)) throw httpError(409, `A ${tr.state} transfer cannot be resumed.`, 'bad-state');
   if (tr.method !== 'direct') throw httpError(409, 'This older transfer cannot be resumed. Send the file again.', 'bad-method');
   if (Date.now() > tr.expiresAt) throw httpError(410, 'This transfer has expired. Start a new upload.', 'expired');
-  requireReceiverReady(device, rc);
+  requireReceiverReady(device, rc, opts);
   const hash = epkHash(epk);
   const fields = { epk_hash: hash };
   if (tr.state === 'failed') Object.assign(fields, { state: 'created', error: null, reason: null, attempts: Math.min(20, (tr.attempts || 0) + 1) });

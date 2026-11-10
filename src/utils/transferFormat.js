@@ -15,17 +15,18 @@ export function formatEta(s) {
   return `${(s / 3600).toFixed(1)} h left`;
 }
 
-const ACTIVE = ['pending', 'hashing', 'uploading', 'confirming'];
+const ACTIVE = ['pending', 'checking', 'hashing', 'uploading', 'confirming'];
 
-/** status: pending | hashing | uploading | confirming | waiting | success | failed | cancelled */
+/** status: pending | checking | hashing | uploading | confirming | waiting | success | failed | cancelled */
 export function statusLabel(state) {
   switch (state.status) {
     case 'pending': return { text: 'Queued', color: 'var(--text-muted)' };
+    case 'checking': return { text: 'Checking the display’s upload service…', color: 'var(--accent)' };
     case 'hashing': return { text: `Preparing (checksum) ${state.progress || 0}%`, color: 'var(--accent)' };
     case 'uploading': return { text: `${state.relay ? 'Sending to display (encrypted)' : 'Uploading'} ${state.progress || 0}%`, color: 'var(--accent)' };
     case 'confirming': return { text: 'Display is checking the file…', color: 'var(--accent)' };
     case 'waiting': return { text: 'Waiting for the display', color: 'var(--warning)' };
-    case 'success': return { text: '✓ Saved on display', color: 'var(--success)' };
+    case 'success': return { text: '✓ Upload completed successfully', color: 'var(--success)' };
     case 'cancelled': return { text: 'Cancelled', color: 'var(--text-muted)' };
     default: return { text: 'Failed', color: 'var(--danger)' };
   }

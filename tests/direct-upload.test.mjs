@@ -18,7 +18,7 @@ import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { setupEnv, Client, footprint, deleteFootprint } from './helpers/harness.js';
 import { createUploadSession, deriveChunkKey } from '../shared/e2eCrypto.js';
-import { uploadChunks, TransferError } from '../shared/directUpload.js';
+import { uploadChunks, probeReceiver, TransferError } from '../shared/directUpload.js';
 
 const IP = '198.51.100.160';
 footprint.ips.add(IP);
@@ -186,6 +186,12 @@ test('setup: V2.1 check-in, Find IP claim, receiver heartbeat pins its public ke
   assert.equal(target.url, `https://${HOST}`);
   assert.equal(target.fingerprint, fingerprint, 'the website pinned exactly the key the Pi generated');
   assert.equal(target.keyChangePending, false);
+  assert.equal(target.status, 'ready');
+  // the browser's own check through the "tunnel" against the REAL receiver
+  assert.equal((await probeReceiver(target, { fetchImpl: tunnelFetch() })).ok, true);
+  const foreign = (url, init) => fetch(url.replace(`https://${HOST}`, `http://127.0.0.1:${receiverPort}`), { ...init, headers: { Origin: 'https://evil.example' } });
+  assert.equal((await probeReceiver(target, { fetchImpl: foreign })).reason, 'origin-mismatch');
+  assert.equal((await probeReceiver({ ...target, fingerprint: 'f'.repeat(64) }, { fetchImpl: tunnelFetch() })).reason, 'wrong-receiver');
 });
 
 test('a 10 MB video goes browser → Pi encrypted; the website and the wire never carry the plaintext', { skip: !python && 'no python', timeout: 120000 }, async () => {
@@ -258,10 +264,12 @@ test('isolation: another customer cannot see the receiver, start, resume or read
 
 test('offline display: refused up front, nothing created; key change: refused until the owner confirms the fingerprint', { skip: !python && 'no python', timeout: 120000 }, async () => {
   await stopReceiver();
+  const stopped = await probeReceiver({ url: `https://${HOST}`, fingerprint: 'f'.repeat(64) }, { fetchImpl: tunnelFetch(), timeoutMs: 3000 });
+  assert.equal(stopped.ok, false); assert.equal(stopped.reason, 'tunnel-unreachable', 'a stopped receiver is never reported as "not installed"');
   await db.asSystem((t) => t`update nsignage.device_receivers set last_seen_at = now() - interval '10 minutes' where device_id = ${DEV}`);
   const session = await createUploadSession({ receiverPublicKey: (await call(alice, 'target', { deviceId: DEV }, 'GET')).body.receiver.publicKey, deviceId: DEV });
   const off = await call(alice, 'create', { deviceId: DEV, filename: 'offline.mp4', size: 100, sha256: sha('o'), epk: session.epk });
-  assert.equal(off.status, 409); assert.equal(off.body.reason, 'display-offline');
+  assert.equal(off.status, 409); assert.ok(['receiver-offline', 'display-offline'].includes(off.body.reason), off.body.reason);
   assert.ok(!(await call(alice, 'list', {}, 'GET')).body.transfers.some((t) => t.filename === 'offline.mp4'), 'no transfer record, nothing uploaded');
 
   fs.rmSync(path.join(home, 'data', 'upload', 'receiver_key.pem'));       // e.g. SD card restored without the key

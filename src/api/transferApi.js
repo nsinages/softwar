@@ -17,7 +17,9 @@ import { cloudError } from './cloudApi';
 import { sha256File, readHead } from '../utils/sha256';
 import { checkMediaFile, contentMatches, extOf } from '../../shared/mediaTypes';
 import { createUploadSession, deriveChunkKey, receiverFingerprint } from '../../shared/e2eCrypto';
-import { uploadChunks, TransferError, RECEIVER_REASON_TEXT } from '../../shared/directUpload';
+import { uploadChunks, probeReceiver, TransferError, RECEIVER_REASON_TEXT } from '../../shared/directUpload';
+
+export { probeReceiver };
 
 export const FINAL_STATES = ['completed', 'cancelled', 'expired'];
 
@@ -29,7 +31,10 @@ const REASON_TEXT = {
   'checksum-mismatch': 'The file arrived damaged on the display. Retry the transfer.',
   'decrypt-failed': 'A part of the file was damaged on the way to the display. Retry the transfer.',
   'display-offline': 'The display is offline, so the file cannot be sent now. Nothing was uploaded. Try again when the display is online.',
-  'no-receiver': 'This display cannot receive files from the website yet: its secure upload service is not installed.',
+  'no-receiver': 'Receiver service is not installed: this display\'s secure upload service has never contacted the website.',
+  'receiver-offline': 'Receiver is offline: the display is online, but its secure upload service is not reporting. Nothing was uploaded.',
+  'receiver-auth-failed': 'The display\'s secure upload service is installed, but the website rejected its device credentials (authentication failed).',
+  'tunnel-not-configured': 'Cloudflare Tunnel is not configured for this display: its upload service has no public upload address.',
   'key-change-pending': 'This display reported a new security key. Confirm it on the Devices page before sending files.',
   'upload-not-configured': 'Sending files is not available right now. Please contact support.',
   'not-allowed': 'The transfer is no longer allowed (it was cancelled, expired, or the display was removed).',
@@ -124,21 +129,41 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Cancelled', 'AbortError')); }, { once: true });
 });
 
-/** Receiver details from the website; refuses when the display cannot take the file now. */
-async function readyTarget(deviceId) {
+// Reasons where checking again later can help (the Retry button re-checks first)
+const RETRYABLE_REASONS = new Set(['display-offline', 'receiver-offline', 'tunnel-down', 'tunnel-unreachable', 'receiver-auth-failed', 'network']);
+
+/**
+ * A genuine readiness check for one display, made fresh every time (also before each Retry):
+ * the website's view (receiver installed, reporting, authenticated, tunnel configured, signing
+ * configured) and then this browser's own probe through the tunnel.
+ *   → { ready: true, target } | { ready: false, reason, message, retryable }
+ */
+export async function checkUploadReadiness(deviceId, { signal, fetchImpl } = {}) {
   let target;
   try {
     target = await getUploadTarget(deviceId);
   } catch (error) {
-    throw new TransferError(errorText(error, 'Checking the display'), { reason: error.response?.data?.reason });
+    const reason = error.response?.data?.reason || (error.response ? undefined : 'network');
+    return { ready: false, reason, message: errorText(error, 'Checking the display'), retryable: !error.response };
   }
-  if (!target?.available) throw new TransferError(REASON_TEXT['no-receiver'], { reason: 'no-receiver' });
-  if (target.keyChangePending) throw new TransferError(REASON_TEXT['key-change-pending'], { reason: 'key-change-pending' });
-  if (!target.online || !target.url) throw new TransferError(REASON_TEXT['display-offline'], { reason: 'display-offline' });
+  const notReady = (reason, message) => ({ ready: false, reason, message: message || REASON_TEXT[reason], retryable: RETRYABLE_REASONS.has(reason), target });
+  if (target?.status && target.status !== 'ready') return notReady(target.status, target.message);
+  // older website responses (no status field)
+  if (!target?.available) return notReady('no-receiver');
+  if (target.keyChangePending) return notReady('key-change-pending');
+  if (!target.online || !target.url) return notReady('display-offline');
   if ((await receiverFingerprint(target.publicKey)) !== target.fingerprint) {
-    throw new TransferError('Security check failed: the display key does not match its fingerprint.', { reason: 'bad-key' });
+    return notReady('bad-key', 'Security check failed: the display key does not match its fingerprint.');
   }
-  return target;
+  const probe = await probeReceiver(target, { signal, fetchImpl });
+  if (!probe.ok) return notReady(probe.reason, probe.message);
+  return { ready: true, target };
+}
+
+async function readyTarget(deviceId, opts) {
+  const r = await checkUploadReadiness(deviceId, opts);
+  if (!r.ready) throw new TransferError(r.message, { reason: r.reason, retryable: r.retryable });
+  return r.target;
 }
 
 /** After the Pi saved the file it reports to the website; wait briefly for that record. */
@@ -155,14 +180,14 @@ async function confirmedTransfer(id, signal) {
   return last;
 }
 
-async function runUpload({ file, deviceId, start, emit, signal, fetchImpl }) {
-  const target = await readyTarget(deviceId);
+async function runUpload({ file, deviceId, target, start, emit, signal, fetchImpl }) {
   const session = await createUploadSession({ receiverPublicKey: target.publicKey, deviceId });
   let info;
   try {
     info = await start(session.epk);
   } catch (error) {
-    throw new TransferError(errorText(error, 'Starting the transfer'), { reason: error.response?.data?.reason });
+    const reason = error.response?.data?.reason;
+    throw new TransferError(errorText(error, 'Starting the transfer'), { reason, retryable: RETRYABLE_REASONS.has(reason) });
   }
   const { transfer } = info;
   emit({ transferId: transfer.id, transfer });
@@ -180,16 +205,19 @@ async function runUpload({ file, deviceId, start, emit, signal, fetchImpl }) {
 
 /**
  * Send one file to one cloud device, directly and encrypted.
- * onUpdate({ phase, loaded, total, transfer, error })   phase: hashing | uploading | confirming | completed | failed | cancelled
+ * onUpdate({ phase, loaded, total, transfer, error })   phase: checking | hashing | uploading | confirming | completed | failed | cancelled
  */
 export async function sendFileDirect(device, file, { onUpdate, signal, fetchImpl } = {}) {
   let transferId = null;
   const emit = (u) => { if (u.transferId) transferId = u.transferId; onUpdate?.({ transferId, ...u }); };
   try {
+    // checked BEFORE hashing, so an unreachable display is reported at once
+    emit({ phase: 'checking' });
+    const target = await readyTarget(device.piDeviceId, { signal, fetchImpl });
     emit({ phase: 'hashing', loaded: 0, total: file.size });
     const sha256 = await fileChecksum(file, { signal, onProgress: (f) => emit({ phase: 'hashing', loaded: f * file.size, total: file.size }) });
     const { transfer, savedAs } = await runUpload({
-      file, deviceId: device.piDeviceId, emit, signal, fetchImpl,
+      file, deviceId: device.piDeviceId, target, emit, signal, fetchImpl,
       start: async (epk) => (await post('create', { deviceId: device.piDeviceId, filename: file.name, size: file.size, sha256, epk })).data,
     });
     return finish(transfer, savedAs, emit, transferId);
@@ -202,6 +230,7 @@ export async function sendFileDirect(device, file, { onUpdate, signal, fetchImpl
  * Retry or resume an unfinished transfer (also after a page reload): the
  * customer re-selects the same file (checked by SHA-256); a new one-time key
  * and ticket are used and the Pi continues from the next chunk it needs.
+ * The display is re-checked first (website status + probe through the tunnel).
  */
 export async function retryTransferWithFile(transferId, file, { onUpdate, signal, fetchImpl } = {}) {
   const emit = (u) => onUpdate?.({ transferId, ...u });
@@ -212,13 +241,15 @@ export async function retryTransferWithFile(transferId, file, { onUpdate, signal
       emit({ phase: 'failed', error: 'Select the same file again to resume this transfer.', needsFile: true });
       return { ok: false, phase: 'failed', needsFile: true, transferId };
     }
+    emit({ phase: 'checking' });
+    const target = await readyTarget(current.deviceId, { signal, fetchImpl });
     emit({ phase: 'hashing', loaded: 0, total: file.size });
     const sha = await fileChecksum(file, { signal });
     if (sha !== current.sha256 || file.size !== current.size) {
       throw new TransferError('This is not the same file as the original transfer. Start a new upload instead.', { reason: 'different-file' });
     }
     const { transfer, savedAs } = await runUpload({
-      file, deviceId: current.deviceId, emit, signal, fetchImpl,
+      file, deviceId: current.deviceId, target, emit, signal, fetchImpl,
       start: async (epk) => (await post('ticket', { transferId, epk })).data,
     });
     return finish(transfer, savedAs, emit, transferId);

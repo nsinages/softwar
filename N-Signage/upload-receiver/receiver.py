@@ -53,7 +53,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 BASE = Path(os.environ.get('NSIGNAGE_HOME') or '/home/ns/n-signage')
 MEDIA = BASE / 'media'
 DATA = BASE / 'data'
@@ -570,6 +570,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _health(self):
+        """Public diagnostics for the website's readiness check, readable from any origin (no secrets, no
+        device id). The fingerprint lets the browser detect a tunnel hostname that leads to the wrong Pi;
+        originAllowed tells it whether this receiver would accept uploads from the page's origin."""
+        origin = self.headers.get('Origin')
+        data = json.dumps({'ok': True, 'service': 'n-signage-upload', 'version': VERSION,
+                           'fingerprint': self.receiver.fingerprint,
+                           'originAllowed': origin is None or origin == ALLOWED_ORIGIN}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(data)
+
     def _origin_ok(self):
         origin = self.headers.get('Origin')
         return origin is None or origin == ALLOWED_ORIGIN
@@ -627,7 +644,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split('?')[0]
         if path == '/v1/health':
-            return self._run(lambda: (200, {'service': 'n-signage-upload', 'version': VERSION}))
+            return self._health()
         m = STATUS_PATH.fullmatch(path)
         if not m:
             return self._send(404, {'ok': False, 'reason': 'not-found'})

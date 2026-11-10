@@ -19,7 +19,7 @@ import {
 import { getDevices } from '../data/store';
 import { getPiStatus, uploadMedia } from '../api/piApi';
 import { isCloudDevice, isCloudMode } from '../api/cloudApi';
-import { sendFileDirect, retryTransferWithFile, precheckFile } from '../api/transferApi';
+import { sendFileDirect, retryTransferWithFile, precheckFile, checkUploadReadiness } from '../api/transferApi';
 import { findLanRoute, uploadLan } from '../api/lanUpload';
 import { IMAGE_EXTS, VIDEO_EXTS } from '../../shared/mediaTypes';
 import UploadPanel from '../components/UploadPanel';
@@ -77,9 +77,13 @@ export default function Upload() {
     });
     setPiStatuses(loadingStates);
 
+    // Cloud displays: also the direct-upload readiness (receiver, tunnel), checked from this browser
     const promises = list.map(async c => {
-      const res = await getPiStatus(c);
-      return { id: c.id, status: res };
+      const [res, upload] = await Promise.all([
+        getPiStatus(c),
+        isCloudDevice(c) ? checkUploadReadiness(c.piDeviceId).catch(() => null) : null,
+      ]);
+      return { id: c.id, status: upload ? { ...res, upload } : res };
     });
 
     const results = await Promise.all(promises);
@@ -129,6 +133,10 @@ export default function Upload() {
     if (u.transferId) next.transferId = u.transferId;
     if (u.error) next.error = u.error;
     switch (u.phase) {
+      case 'checking':
+        next.status = 'checking';
+        next.error = undefined;
+        break;
       case 'hashing':
         next.status = 'hashing';
         next.progress = u.total ? Math.round((u.loaded / u.total) * 100) : 0;
@@ -208,7 +216,7 @@ export default function Upload() {
         return;
       }
     }
-    patch(id, { status: 'hashing', progress: 0, error: undefined, relay: true, lan: false });
+    patch(id, { status: 'checking', progress: 0, error: undefined, relay: true, lan: false });
     const opts = { signal: ac.signal, onUpdate: u => onRelayUpdate(id, u) };
     const r = transferId
       ? await retryTransferWithFile(transferId, file, opts)
@@ -471,15 +479,22 @@ export default function Upload() {
                             disabled={isUploading}
                             onChange={() => handleDeviceToggle(c.id)}
                           />
-                          <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span style={{ fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
-                              {c.deviceId}
-                            </span>
-                            <span className="ip-chip" style={{ fontSize: '11px' }}>{c.ip}</span>
-                            {c.nickName && (
-                              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                                ({c.nickName})
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+                                {c.deviceId}
                               </span>
+                              <span className="ip-chip" style={{ fontSize: '11px' }}>{c.ip}</span>
+                              {c.nickName && (
+                                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                                  ({c.nickName})
+                                </span>
+                              )}
+                            </div>
+                            {statusObj.upload && (
+                              <div style={{ fontSize: '11px', marginTop: 2, color: statusObj.upload.ready ? 'var(--success)' : 'var(--warning)' }}>
+                                {statusObj.upload.ready ? 'Secure upload ready' : statusObj.upload.message}
+                              </div>
                             )}
                           </div>
                           <StatusBadge status={status} showLabel={false} />
