@@ -15,13 +15,22 @@ import {
 } from '../_lib/cloud.js';
 import { asSystem, asDevice, rateLimit } from '../_lib/db.js';
 import { ticketPublicKeys } from '../_lib/tickets.js';
-import { upsertReceiver, receiverCheck, applyReceiverResult } from '../_lib/transfers.js';
+import { upsertReceiver, receiverCheck, applyReceiverResult, noteReceiverAuthFailure } from '../_lib/transfers.js';
 
 async function authenticate(req, deviceId) {
   const secretHash = sha256(bearerSecret(req));
-  const [d] = await asSystem((t) => t`select secret_hash from nsignage.devices where id = ${deviceId}`);
+  const [d] = await asSystem((t) => t`select secret_hash, owner_id from nsignage.devices where id = ${deviceId}`);
   if (!d?.secret_hash || !safeEqual(d.secret_hash, secretHash)) {
     console.warn('[N-SIGNAGE UPLOAD] receiver auth failed', deviceId);
+    // Remembered (at most every 10 min) only for a Pi someone owns, so its owner sees
+    // "installed but authentication failed" instead of "not installed".
+    if (d?.owner_id) {
+      try {
+        await asSystem((t) => noteReceiverAuthFailure(t, deviceId, d.secret_hash ? 'secret-mismatch' : 'not-registered'));
+      } catch (err) {
+        console.warn('[N-SIGNAGE UPLOAD] could not record the auth failure', err.message);
+      }
+    }
     throw httpError(401, 'Device authentication failed', 'bad-device-secret');
   }
 }

@@ -117,9 +117,10 @@ atomic rename to a new name) and its own `data/upload/`.
 
 ## 3. DNS and Cloudflare
 
-`nsinages.in` is on GoDaddy DNS today (`ns51/ns52.domaincontrol.com`). Visible records:
-the apex `A 216.198.79.1`, `www → vercel-dns`, `software → vercel-dns`. No MX or TXT
-records were found.
+**Status (2026-11-10):** the zone is on Cloudflare (`bradley`/`marjory.ns.cloudflare.com`);
+steps 1–3 are done. Before the move, `nsinages.in` was on GoDaddy DNS
+(`ns51/ns52.domaincontrol.com`). Visible records were the apex `A 216.198.79.1`,
+`www → vercel-dns` and `software → vercel-dns`; no MX or TXT records were found.
 
 1. Export the full zone from GoDaddy, which includes records that are not visible from outside.
 2. Add the zone to Cloudflare (Free). Recreate every record exactly, with the Vercel
@@ -184,8 +185,8 @@ services, about 110 MB, fits. The caps prevent either service from starving the 
    is additive; old transfer rows stay readable.
 5. **Website release:** merge to `main` and deploy, then check `/api/health`. It should show
    `"upload": { "mode": "direct-e2e", "ticketKey": true, "mediaStoredOnWebsite": false }`.
-   Cloud uploads show "upload service not installed" until a Pi has the receiver. LAN
-   upload is unaffected.
+   Cloud uploads show "Receiver service is not installed" until a Pi has the receiver (§7).
+   LAN upload is unaffected.
 6. **Provision one Pi** (staff PC):
    `node scripts/provision-tunnel.mjs --device <deviceId>`, then again with `--apply`.
 7. **Pilot install** on that Pi:
@@ -196,7 +197,11 @@ services, about 110 MB, fits. The caps prevent either service from starving the 
    ```
    Then delete the token file. The script prints the six existing services before and after.
 8. **Pilot checks:**
-   - `curl https://p-….nsinages.in/v1/health`;
+   - `sudo ./install-upload-receiver.sh --status`: every line `OK`;
+   - `curl https://p-….nsinages.in/v1/health` from outside the Pi's network;
+   - Devices → **Test** and the Upload page show "Secure upload ready" for that display;
+   - a small image upload ends in "Upload completed successfully", and the file is in
+     `/home/ns/n-signage/media` and playing;
    - 50, 200 and 500 MB uploads from mobile data;
    - a cut connection, then resume; a receiver restart mid-upload;
    - a reboot;
@@ -206,7 +211,39 @@ services, about 110 MB, fits. The caps prevent either service from starving the 
 9. **Clean-up:** remove `BLOB_*` and `NSIGNAGE_BLOB_ACCESS` from Vercel and disconnect the
    Blob store. Old relay copies in the store can be deleted there.
 
-## 7. Rollback
+## 7. Readiness: what each upload message means
+
+Before anything is hashed or sent (and again on every **Retry**), the browser runs a
+genuine check: the website's view of the receiver (`GET /api/transfer?action=target`,
+field `status`), then its own probe `GET https://p-….nsinages.in/v1/health` through the
+tunnel. The Upload page shows the result per display. On the Devices page, **Test** shows it
+too. The receiver answers `/v1/health` to any origin (no secrets, no device id). The answer
+carries its key fingerprint and whether the caller's origin may upload.
+
+| Status | Message shown | Decided by | What is wrong / how to fix |
+|---|---|---|---|
+| `upload-not-configured` | Sending files is not available right now | website | `NSIGNAGE_TICKET_KEY` missing or invalid in Vercel |
+| `no-receiver` | Receiver service is not installed | website: no heartbeat ever, no refused login | install the receiver (§6.6–6.7) |
+| `receiver-auth-failed` | …installed, but the website rejected its device credentials | website: refused receiver login within 15 min (`security_events`) | `data/cloud_secret` does not match the website; check the V2.1 agent is connected, then `sudo systemctl restart n-signage-upload` |
+| `key-change-pending` | This display reported a new security key | website | the owner confirms the fingerprint on the Devices page |
+| `receiver-offline` | Receiver is offline: the display is online, but its secure upload service is not reporting | website: agent checks in, receiver silent > 90 s | `systemctl status n-signage-upload`, `journalctl -u n-signage-upload` |
+| `display-offline` | The display is offline | website: agent and receiver both silent | power / network of the Pi |
+| `tunnel-not-configured` | Cloudflare Tunnel is not configured | website: receiver reports no hostname | reinstall with `--hostname p-….nsinages.in` |
+| `tunnel-down` | Cloudflare Tunnel is not connected | browser: Cloudflare answers the hostname, the receiver does not (error 1033/530/502) | `journalctl -u n-signage-tunnel` (token, outbound 7844/443), ingress must point at `http://127.0.0.1:8090` |
+| `tunnel-unreachable` | The display's upload address cannot be reached from this browser | browser: nothing answers (DNS / network / timeout 8 s) | DNS CNAME missing or not proxied; customer network blocks it |
+| `wrong-receiver` | …leads to a different upload service (wrong tunnel hostname) | browser: other key fingerprint or not our service | hostname/CNAME points at another tunnel or Pi; re-provision |
+| `origin-mismatch` | The display only accepts uploads from the official website address | browser: `originAllowed: false` | `NSIGNAGE_UPLOAD_ORIGIN` in `/etc/n-signage-upload.env` must be `https://software.nsinages.in` |
+| ticket reasons (`bad-ticket`, `ticket-expired`, `unknown-ticket-key`, `wrong-key`, …) | Upload ticket validation failed: … | receiver, during the upload | Retry (fresh ticket); persistent → Pi clock, or the key rotated (§2) |
+| — | ✓ Upload completed successfully | Pi's authenticated result (size + SHA-256) | — |
+
+Only the receiver's own heartbeat decides whether it can take a file. A briefly silent V2.1
+agent does not block an upload the receiver can accept.
+
+On the Pi, `sudo ./install-upload-receiver.sh --status` checks the same chain step by step:
+installed, running, heartbeat accepted, tunnel configured, tunnel connected, public address
+answering through Cloudflare.
+
+## 8. Rollback
 
 - **Website:** Vercel Instant Rollback to the previous deployment. The migration is
   additive, so the old code still works with the database.

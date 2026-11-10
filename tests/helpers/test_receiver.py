@@ -424,9 +424,16 @@ class HttpLayer(Base):
         self.assertEqual(self.req('GET', '/v1/whatever')[0], 404)
         self.assertEqual(self.req('POST', f'/v1/transfers/{self.tid}/chunks/0', b'x')[0], 405)
         self.assertEqual(self.req('GET', '/../../etc/passwd')[0], 404)
-        st, j, _ = self.req('GET', '/v1/health')
+        st, j, h = self.req('GET', '/v1/health')
         self.assertEqual((st, j['service']), (200, 'n-signage-upload'))
         self.assertNotIn(DEVICE, json.dumps(j), 'health reveals no identity')
+        self.assertEqual(j['fingerprint'], self.rx.fingerprint, 'browser can detect a hostname that leads to another Pi')
+        self.assertTrue(j['originAllowed'])
+        # readable by any origin (diagnostics only), but says whether uploads from that origin would be accepted
+        st, j, h = self.req('GET', '/v1/health', None, {'Origin': 'https://evil.example'})
+        self.assertEqual(st, 200)
+        self.assertFalse(j['originAllowed'])
+        self.assertEqual(h.get('Access-Control-Allow-Origin'), '*')
 
 
 if __name__ == '__main__':

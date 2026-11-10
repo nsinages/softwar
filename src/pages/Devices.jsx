@@ -18,7 +18,8 @@ import {
 } from 'lucide-react';
 import { getDevices, saveDevice, updateDevice, deleteDevice, DEVICES_CHANGED_EVENT } from '../data/store';
 import { getPiStatus } from '../api/piApi';
-import { isCloudMode, cloudRename, cloudRemove, syncCloudDevices } from '../api/cloudApi';
+import { isCloudMode, isCloudDevice, cloudRename, cloudRemove, syncCloudDevices } from '../api/cloudApi';
+import { checkUploadReadiness } from '../api/transferApi';
 import CloudAddDevice from '../components/CloudAddDevice';
 import LegacyDevicesPanel from '../components/LegacyDevicesPanel';
 import StatusBadge from '../components/StatusBadge';
@@ -288,8 +289,12 @@ export default function Devices() {
   async function handleTest(device) {
     setTestingId(device.id);
     setTestResults(r => ({ ...r, [device.id]: null }));
-    const result = await getPiStatus(device);
-    setTestResults(r => ({ ...r, [device.id]: result }));
+    // Cloud displays: also a real check of the secure upload path (website status + this browser → tunnel → receiver)
+    const [result, upload] = await Promise.all([
+      getPiStatus(device),
+      isCloudDevice(device) ? checkUploadReadiness(device.piDeviceId).catch(() => null) : null,
+    ]);
+    setTestResults(r => ({ ...r, [device.id]: upload ? { ...result, upload } : result }));
     setTestingId(null);
   }
 
@@ -556,6 +561,14 @@ export default function Devices() {
 
                     <td>
                       <StatusBadge status={status} />
+                      {testResult?.upload && (
+                        <div
+                          style={{ fontSize: '11px', marginTop: 3, maxWidth: 220, color: testResult.upload.ready ? 'var(--success)' : 'var(--warning)' }}
+                          title={testResult.upload.message || ''}
+                        >
+                          {testResult.upload.ready ? 'Secure upload ready' : testResult.upload.message}
+                        </div>
+                      )}
                       {testResult?.ok && testResult.data?.current_media && (
                         <div
                           style={{

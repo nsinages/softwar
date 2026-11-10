@@ -50,7 +50,21 @@ existing_states() { for s in "${EXISTING[@]}"; do printf '  %-28s %s\n' "$s" "$(
 
 if [ "$MODE" = status ]; then
   for u in "${UNITS[@]}"; do systemctl --no-pager --lines=5 status "$u" || true; done
-  curl -fsS -m 5 http://127.0.0.1:8090/v1/health && echo
+  # The same chain the website checks, step by step (each line names what is broken)
+  check() { if eval "$2" >/dev/null 2>&1; then echo "  OK    $1"; else echo "  FAIL  $1"; fi; }
+  PUB_HOST="$(sed -n 's/^NSIGNAGE_UPLOAD_HOSTNAME=//p' "$UPLOAD_ENV" 2>/dev/null || true)"
+  echo "Upload path:"
+  check "receiver installed ($UPLOAD_ENV, unit file)" "[ -f '$UPLOAD_ENV' ] && [ -f /etc/systemd/system/n-signage-upload.service ]"
+  check "receiver running (127.0.0.1:8090/v1/health)" "curl -fsS -m 5 http://127.0.0.1:8090/v1/health"
+  check "website accepts its heartbeat (no 'Heartbeat failed' in the last 2 min)" \
+        "! journalctl -u n-signage-upload --since '-2 min' --no-pager | grep -q 'Heartbeat failed'"
+  check "tunnel configured ($TUNNEL_ENV)" "[ -s '$TUNNEL_ENV' ]"
+  check "tunnel connected to Cloudflare (Registered tunnel connection)" \
+        "journalctl -u n-signage-tunnel --no-pager -n 200 | grep -q 'Registered tunnel connection'"
+  if [ -n "$PUB_HOST" ]; then
+    check "public address answers through Cloudflare (https://$PUB_HOST/v1/health)" "curl -fsS -m 10 https://$PUB_HOST/v1/health"
+  fi
+  journalctl -u n-signage-upload --no-pager -n 3 | sed 's/^/    /'
   echo "Existing services:"; existing_states
   exit 0
 fi

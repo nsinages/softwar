@@ -3,7 +3,7 @@
 // it checks ownership, records metadata and signs short-lived upload tickets.
 // Every action needs the logged-in customer who owns the target Pi.
 //
-//   GET  action=target&deviceId=   → { receiver }   Pi receiver URL, public key, online, limits
+//   GET  action=target&deviceId=   → { receiver }   Pi receiver URL, public key, status + message, limits
 //   POST action=create   { deviceId, filename, size, sha256, epk }  → { transfer, ticket, uploadUrl, chunkBytes }
 //   POST action=ticket   { transferId, epk }   new ticket (expired ticket, retry, resume with a new browser key)
 //   GET  action=status&id= → { transfer }       state: created|completed|failed|cancelled|expired
@@ -21,7 +21,7 @@ import { asSystem, rateLimit } from './_lib/db.js';
 import { ticketsConfigured } from './_lib/tickets.js';
 import {
   createDirectTransfer, ticketFor, renewTicket, requireOwnTransfer, transferView, listTransfers, cancelTransfer,
-  expireTransfers, receiverForOwner, receiverView, confirmReceiverKey, epkHash,
+  expireTransfers, receiverForOwner, receiverView, confirmReceiverKey, epkHash, receiverAuthFailedAt,
 } from './_lib/transfers.js';
 
 function requireTickets() {
@@ -38,6 +38,17 @@ function checkDeviceId(deviceId) {
   if (!DEVICE_ID_RX.test(deviceId)) throw httpError(400, 'Invalid device id');
 }
 
+/** Extra facts for receiverStatus(): is ticket signing configured, and was this Pi's receiver refused lately? */
+async function statusFacts(deviceId) {
+  let authFailedAt = null;
+  try {
+    authFailedAt = await asSystem((t) => receiverAuthFailedAt(t, deviceId));
+  } catch (err) {
+    console.warn('[N-SIGNAGE UPLOAD] auth-failure lookup', err.message);
+  }
+  return { ticketsReady: ticketsConfigured(), authFailedAt };
+}
+
 const ticketResponse = (transfer, rc, { ticket, claims }) => ({
   ok: true, transfer: transferView(transfer), ticket, ticketExpiresAt: claims.exp * 1000,
   uploadUrl: `https://${rc.hostname}`, chunkBytes: claims.chunk,
@@ -49,13 +60,17 @@ export default async function handler(req, res) {
 
     if (req.method === 'GET') {
       if (!['list', 'status', 'target'].includes(action)) throw httpError(404, 'Unknown action');
+      // looked up OUTSIDE the customer transaction (no nested pool connection); used only after
+      // the ownership check below, so nothing about another customer's Pi is revealed
+      const facts = action === 'target' && DEVICE_ID_RX.test(String(req.query?.deviceId || '')) ? await statusFacts(String(req.query.deviceId)) : null;
       const result = await withCustomer(req, async (t, { user }) => {
         if (action === 'list') return { ok: true, transfers: await listTransfers(t, user) };
         if (action === 'status') return { ok: true, transfer: transferView(await requireOwnTransfer(t, user, req.query?.id)) };
         const deviceId = String(req.query?.deviceId || '');
         checkDeviceId(deviceId);
         const device = await requireOwnedDevice(t, user, deviceId);
-        return { ok: true, receiver: receiverView(await receiverForOwner(t, deviceId), device) };
+        const rc = await receiverForOwner(t, deviceId);
+        return { ok: true, receiver: receiverView(rc, device, Date.now(), facts) };
       });
       return send(res, 200, result);
     }
@@ -75,10 +90,11 @@ export default async function handler(req, res) {
       } catch (err) {
         console.warn('[N-SIGNAGE TRANSFER] cleanup', err.message);
       }
+      const facts = await statusFacts(deviceId); // outside the transaction; used only after the ownership check
       const result = await withCustomer(req, async (t, { user: me }) => {
         const device = await requireOwnedDevice(t, me, deviceId);
         const rc = await receiverForOwner(t, deviceId);
-        const tr = await createDirectTransfer(t, me, device, rc, body);
+        const tr = await createDirectTransfer(t, me, device, rc, body, facts);
         return ticketResponse(tr, rc, ticketFor(tr, epkHash(body.epk)));
       });
       return send(res, 200, result);
@@ -91,7 +107,7 @@ export default async function handler(req, res) {
         const tr = await requireOwnTransfer(t, me, body.transferId);
         const device = await requireOwnedDevice(t, me, tr.deviceId);
         const rc = await receiverForOwner(t, tr.deviceId);
-        const { transfer, ticket, claims } = await renewTicket(t, tr, device, rc, body.epk);
+        const { transfer, ticket, claims } = await renewTicket(t, tr, device, rc, body.epk, { ticketsReady: true });
         return ticketResponse(transfer, rc, { ticket, claims });
       });
       return send(res, 200, result);
